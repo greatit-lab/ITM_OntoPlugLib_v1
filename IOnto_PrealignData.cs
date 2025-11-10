@@ -101,7 +101,7 @@ namespace Onto_PrealignDataLib
             long currLen = 0;
 
             // [핵심 수정] CS0165 오류 해결: 변수 선언 시 즉시 초기화
-            string addedText = ""; 
+            string addedText = "";
 
             int maxRetries = 5;
             int delayMs = 300;
@@ -163,9 +163,25 @@ namespace Onto_PrealignDataLib
                     RegexOptions.IgnoreCase);
 
                 // CS0165 오류가 해결됨
-                foreach (Match m in rex.Matches(addedText))
+                foreach (Match m in rex.Matches(addedText)) 
                 {
-                    // ... (이하 파싱 및 DB 적재 로직 동일) ...
+                    DateTime ts;
+                    bool ok = DateTime.TryParseExact(
+                                 m.Groups[4].Value.Trim(),
+                                 new[] { "MM-dd-yy HH:mm:ss", "M-d-yy HH:mm:ss" },
+                                 CultureInfo.InvariantCulture,
+                                 DateTimeStyles.None,
+                                 out ts) ||
+                              DateTime.TryParse(m.Groups[4].Value.Trim(), out ts);
+                    if (!ok) continue;
+
+                    decimal x, y, n;
+                    if (decimal.TryParse(m.Groups[1].Value, out x) &&
+                        decimal.TryParse(m.Groups[2].Value, out y) &&
+                        decimal.TryParse(m.Groups[3].Value, out n))
+                    {
+                        rows.Add(Tuple.Create(x, y, n, ts));
+                    }
                 }
 
                 if (rows.Count > 0)
@@ -185,16 +201,13 @@ namespace Onto_PrealignDataLib
             catch (FileNotFoundException)
             {
                 SimpleLogger.Debug("File not found (maybe deleted): " + filePath);
-                lock(_lastLen) { _lastLen.Remove(filePath); }
+                lock (_lastLen) { _lastLen.Remove(filePath); }
             }
             catch (Exception ex)
             {
                 SimpleLogger.Error($"Unhandled EX in ProcessAndUpload for {filePath} ▶ {ex.GetBaseException().Message}");
             }
         }
-        
-        // [삭제] ProcessCore, ProcessIncremental (ProcessAndUpload로 통합됨)
-        // [삭제] WaitReady (대체됨)
 
         /*──────────────── 행 → DB 삽입 공통 ────────────────*/
         private void InsertRows(List<Tuple<decimal, decimal, decimal, DateTime>> rows, string eqpid)
@@ -303,13 +316,10 @@ namespace Onto_PrealignDataLib
         }
 
         /*──────────────── Utilities ───────────────────────*/
-        
-        // [삭제] ReadAllText (대체됨)
-
         private string GetEqpid(string ini)
         {
-            string iniPath = Path.IsPathRooted(ini) 
-                ? ini 
+            string iniPath = Path.IsPathRooted(ini)
+                ? ini
                 : Path.Combine(AppDomain.CurrentDomain.BaseDirectory, ini);
 
             if (!File.Exists(iniPath)) return string.Empty;

@@ -8,55 +8,79 @@ using System.Linq;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
-using ConnectInfo;
-using ITM_Agent.Services; // TimeSyncProvider용 (이것은 이미 참조 중)
 using Npgsql;
-// using ITM_Agent.Plugins; // [삭제] CS0234 오류 원인
+using ConnectInfo;
+using ITM_Agent.Services;
 
 namespace Onto_ErrorDataLib
 {
-    // ... (Logger) ...
+    /*──────────────────────── Logger ───────────────────────*/
+    internal static class SimpleLogger
+    {
+        private static volatile bool _debugEnabled = false;
+        public static void SetDebug(bool enabled) { _debugEnabled = enabled; }
+
+        private static readonly object _sync = new object();
+        private static readonly string _dir = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Logs");
+        private static string PathOf(string sfx) => System.IO.Path.Combine(_dir, $"{DateTime.Now:yyyyMMdd}_{sfx}.log");
+
+        private static void Write(string s, string m)
+        {
+            try
+            {
+                lock (_sync)
+                {
+                    System.IO.Directory.CreateDirectory(_dir);
+                    var line = $"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} [ErrorData] {m}{Environment.NewLine}";
+                    System.IO.File.AppendAllText(PathOf(s), line, System.Text.Encoding.UTF8);
+                }
+            }
+            catch { /* 로깅 실패 무시 */ }
+        }
+
+        public static void Event(string m) { Write("event", m); }
+        public static void Error(string m) { Write("error", m); }
+        public static void Debug(string m)
+        {
+            if (_debugEnabled) Write("debug", m);
+        }
+    }
 
     public interface IOnto_ErrorData
     {
         string PluginName { get; }
         void ProcessAndUpload(string filePath, object arg1 = null, object arg2 = null);
-        // StartWatch/StopWatch 제거
     }
 
-    // [수정] IIncrementalPluginMetadata 인터페이스 구현 제거 (CS0246 오류 원인)
     public class Onto_ErrorData : IOnto_ErrorData
     {
+        // [핵심] 증분 처리를 위한 마지막 파일 크기(Offset) 저장소
+        // static으로 선언되어 Agent가 재시작되지 않는 한 메모리에 유지됩니다.
         private static readonly Dictionary<string, long> _lastLen =
             new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
 
         private readonly string _pluginName = "Onto_ErrorData";
         public string PluginName { get { return _pluginName; } }
 
-        // ▼▼▼ [추가] Req 3. 메타데이터 속성 (Agent가 리플렉션으로 이 이름을 찾아 읽음) ▼▼▼
-        /// <summary>
-        /// ucUploadPanel 자동 완성을 위한 기본 작업 이름
-        /// </summary>
-        public string DefaultTaskName => "Error Log (Auto)";
-        /// <summary>
-        /// ucUploadPanel 자동 완성을 위한 기본 파일 필터
-        /// </summary>
+        // [추가] Req 3. 메타데이터 속성 (Agent가 리플렉션으로 이 이름을 찾아 읽음)
+        public string DefaultTaskName => "Error";
         public string DefaultFileFilter => "*Error.dat";
-        // ▲▲▲ [추가] 완료 ▲▲▲
 
         static Onto_ErrorData()
         {
-#if NETCOREAPP || NET5_0_OR_GREATER
-            Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
-#endif
+            #if NETCOREAPP || NET5_0_OR_GREATER
+                Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
+            #endif
         }
 
-        // [수정] ucUploadPanel (탭 2)에서 호출하는 증분 처리 로직
+        #region === Public API ===
+
+        // ucUploadPanel (탭 2)에서 호출하는 증분 처리 로직
         public void ProcessAndUpload(string filePath, object arg1 = null, object arg2 = null)
         {
             SimpleLogger.Event("Process (Incremental) ▶ " + filePath);
             string eqpid = GetEqpidFromSettings(arg1 as string ?? "Settings.ini");
-            
+
             long prevLen = 0;
             long currLen = 0;
             string[] addedLines = null;
@@ -65,12 +89,12 @@ namespace Onto_ErrorDataLib
             try
             {
                 // --- 증분 처리를 위한 길이 확인 및 파일 읽기 ---
-                lock (_lastLen) 
+                lock (_lastLen)
                 {
                     _lastLen.TryGetValue(filePath, out prevLen);
                 }
 
-                // ★ 공유 위반 해결: FileShare.ReadWrite
+                // FileShare.ReadWrite로 증분 읽기 (공유 위반 해결)
                 using (var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
                 {
                     currLen = fs.Length;
@@ -78,9 +102,9 @@ namespace Onto_ErrorDataLib
                     if (currLen == prevLen && prevLen > 0)
                     {
                         SimpleLogger.Debug("File length unchanged, skipping incremental process: " + filePath);
-                        return; 
+                        return;
                     }
-                    
+
                     if (currLen < prevLen)
                     {
                         SimpleLogger.Event("File truncated (Size decreased). Resetting offset: " + filePath);
@@ -100,16 +124,16 @@ namespace Onto_ErrorDataLib
                     // [증분 데이터 처리] (메모리 안정화)
                     else
                     {
-                        fs.Seek(prevLen, SeekOrigin.Begin); // ★ 마지막 위치로 이동
+                        fs.Seek(prevLen, SeekOrigin.Begin);
                         using (var srAdded = new StreamReader(fs, Encoding.GetEncoding(949)))
                         {
-                            string addedText = srAdded.ReadToEnd(); // ★ 새로 추가된 텍스트만 읽음
+                            string addedText = srAdded.ReadToEnd();
                             addedLines = addedText.Split(new[] { "\r\n", "\n" }, StringSplitOptions.RemoveEmptyEntries);
                         }
                     }
-                } // FileStream 닫기
+                } // FileStream 닫기 (잠금 해제)
                 
-                // --- ProcessFile 로직 통합 ---
+                // --- ProcessFile 로직을 여기로 통합 ---
 
                 // [메타데이터 처리] (prevLen == 0일 때만)
                 if (prevLen == 0 && allLinesForMeta != null)
@@ -128,7 +152,8 @@ namespace Onto_ErrorDataLib
                 }
                 else
                 {
-                    var errorTable = BuildErrorDataTable(addedLines, eqpid); 
+                    var errorTable = BuildErrorDataTable(addedLines, eqpid);
+
                     HashSet<string> allowSet = LoadErrorFilterSet();
                     int matched, skipped;
                     DataTable filtered = ApplyErrorFilter(errorTable, allowSet, out matched, out skipped);
@@ -147,7 +172,7 @@ namespace Onto_ErrorDataLib
                 }
 
                 SimpleLogger.Event("Done (Incremental) ▶ " + Path.GetFileName(filePath));
-                
+
                 // --- 현재 파일 크기를 _lastLen에 갱신 ---
                 lock (_lastLen)
                 {
@@ -157,7 +182,7 @@ namespace Onto_ErrorDataLib
             catch (FileNotFoundException)
             {
                 SimpleLogger.Debug("File not found (maybe deleted): " + filePath);
-                lock(_lastLen) { _lastLen.Remove(filePath); }
+                lock (_lastLen) { _lastLen.Remove(filePath); }
             }
             catch (IOException ioEx)
             {
@@ -169,11 +194,10 @@ namespace Onto_ErrorDataLib
             }
         }
 
-        // ... (ParseMeta, BuildInfoDataTable, BuildErrorDataTable, DB Helper, Utility 메서드 등은 이전 답변과 동일하게 유지) ...
-        // ... (IsInfoChanged, UploadDataTable, LoadErrorFilterSet, ApplyErrorFilter 등) ...
-        // ... (GetEqpidFromSettings, WaitForFileReady) ...
+        #endregion
 
-        #region === Core (기존 메서드 유지) ===
+        #region === Core  ===
+        // NormalizeErrorId
         private static string NormalizeErrorId(object v)
         {
             if (v == null || v == DBNull.Value) return string.Empty;
@@ -205,7 +229,7 @@ namespace Onto_ErrorDataLib
                     }
                 }
             }
-            catch(Exception ex)
+            catch (Exception ex)
             {
                 SimpleLogger.Error("Failed to load ErrorFilterSet from DB: " + ex.Message);
             }
@@ -219,11 +243,11 @@ namespace Onto_ErrorDataLib
             {
                 return src != null ? src.Clone() : new DataTable();
             }
-            
+
             if (allowSet == null || allowSet.Count == 0)
             {
-                 skipped = src.Rows.Count;
-                 return src.Clone();
+                skipped = src.Rows.Count;
+                return src.Clone();
             }
 
             var dst = src.Clone();
@@ -257,7 +281,7 @@ namespace Onto_ErrorDataLib
                     SimpleLogger.Event("itm_info unchanged ▶ eqpid=" + (r["eqpid"] ?? ""));
                     return;
                 }
-                
+
                 DateTime srcDate = DateTime.Now;
                 var dv = r["date"];
                 if (dv != null && dv != DBNull.Value)
@@ -270,21 +294,14 @@ namespace Onto_ErrorDataLib
                               .Instance.ToSynchronizedKst(srcDate);
                 srv = new DateTime(srv.Year, srv.Month, srv.Day, srv.Hour, srv.Minute, srv.Second);
 
+                // [핵심 수정] 42P10 오류 해결: ON CONFLICT 구문 제거
+                // IsInfoChanged()가 중복을 이미 확인했으므로, 단순 INSERT만 수행합니다.
                 const string SQL = @"
                     INSERT INTO public.itm_info
                         (eqpid, system_name, system_model, serial_num, application, version, db_version, ""date"", serv_ts)
                     VALUES
-                        (@eqpid, @system_name, @system_model, @serial_num, @application, @version, @db_version, @date, @serv_ts)
-                    ON CONFLICT (eqpid) DO UPDATE SET 
-                        system_name = EXCLUDED.system_name,
-                        system_model = EXCLUDED.system_model,
-                        serial_num = EXCLUDED.serial_num,
-                        application = EXCLUDED.application,
-                        version = EXCLUDED.version,
-                        db_version = EXCLUDED.db_version,
-                        ""date"" = EXCLUDED.""date"",
-                        serv_ts = EXCLUDED.serv_ts;
-                "; 
+                        (@eqpid, @system_name, @system_model, @serial_num, @application, @version, @db_version, @date, @serv_ts);
+                ";
 
                 using (var conn = new NpgsqlConnection(cs))
                 {
@@ -499,7 +516,7 @@ namespace Onto_ErrorDataLib
                         foreach (var c in cols)
                         {
                             var param = new NpgsqlParameter("@" + c, DBNull.Value);
-                            // 타입 추론에 맡김 (혹은 DataColumn의 DataType을 NqgsqlDbType으로 매핑)
+                            // 타입 추론에 맡김 (혹은 DataColumn의 DataType을 NpgsqlDbType으로 매핑)
                             cmd.Parameters.Add(param);
                         }
 

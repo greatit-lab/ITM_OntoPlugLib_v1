@@ -111,7 +111,7 @@ namespace Onto_WaferFlatDataLib
         public string PluginName => "Onto_WaferFlatData";
 
         #region === 외부 호출 ===
-        
+
         public void ProcessAndUpload(string filePath, object settingsFilePath = null, object arg2 = null)
         {
             SimpleLogger.Event($"ProcessAndUpload(file,ini) ▶ {filePath}");

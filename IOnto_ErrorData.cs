@@ -314,14 +314,15 @@ namespace Onto_ErrorDataLib
                         cmd.ExecuteNonQuery();
                     }
                 }
-                SimpleLogger.Event("itm_info inserted/updated ▶ eqpid=" + (r["eqpid"] ?? ""));
+                SimpleLogger.Event("itm_info inserted ▶ eqpid=" + (r["eqpid"] ?? ""));
             }
             catch (Exception ex)
             {
-                 SimpleLogger.Error("UploadItmInfoUpsert failed: " + ex.Message);
+                SimpleLogger.Error("UploadItmInfoUpsert failed: " + ex.Message);
             }
         }
 
+        // ParseMeta
         private Dictionary<string, string> ParseMeta(string[] lines)
         {
             var d = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -399,7 +400,7 @@ namespace Onto_ErrorDataLib
             {
                 var m = rg.Match(ln);
                 if (!m.Success) continue;
-                
+
                 if (!DateTime.TryParseExact(
                     m.Groups["ts"].Value.Trim(),
                     "dd-MMM-yy h:mm:ss tt",
@@ -407,7 +408,7 @@ namespace Onto_ErrorDataLib
                     DateTimeStyles.None,
                     out DateTime parsedTs))
                 {
-                    continue; 
+                    continue;
                 }
 
                 var dr = dt.NewRow();
@@ -434,7 +435,8 @@ namespace Onto_ErrorDataLib
         }
         #endregion
 
-        #region === DB Helper (기존 메서드 유지) ===
+        #region === DB Helper ===
+        // itm_info 변경 여부 판단
         private bool IsInfoChanged(DataTable dt)
         {
             if (dt == null || dt.Rows.Count == 0) return false;
@@ -467,7 +469,7 @@ namespace Onto_ErrorDataLib
                     cmd.Parameters.AddWithValue("@dbv", r["db_version"] ?? (object)DBNull.Value);
 
                     object o = cmd.ExecuteScalar();
-                    return o == null; 
+                    return o == null;
                 }
             }
         }
@@ -493,9 +495,11 @@ namespace Onto_ErrorDataLib
 
                     using (var cmd = new NpgsqlCommand(sql, conn, tx))
                     {
+                        // [수정] 파라미터 미리 정의
                         foreach (var c in cols)
                         {
                             var param = new NpgsqlParameter("@" + c, DBNull.Value);
+                            // 타입 추론에 맡김 (혹은 DataColumn의 DataType을 NqgsqlDbType으로 매핑)
                             cmd.Parameters.Add(param);
                         }
 
@@ -532,8 +536,9 @@ namespace Onto_ErrorDataLib
         }
         #endregion
 
-        #region === Utility (기존 메서드 유지) ===
-        
+        #region === Utility ===
+
+        // [수정] WaitForFileReady (공유 읽기/쓰기 모드 확인)
         private bool WaitForFileReady(string path, int maxRetries, int delayMs)
         {
             for (int i = 0; i < maxRetries; i++)
@@ -544,11 +549,12 @@ namespace Onto_ErrorDataLib
                     {
                         using (var fs = File.Open(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
                         {
-                            return true;             
+                            return true;
                         }
                     }
                     catch (IOException)
                     {
+                        // 여전히 잠겨 있음 → 재시도
                     }
                 }
                 Thread.Sleep(delayMs);

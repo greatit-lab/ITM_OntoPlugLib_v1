@@ -163,7 +163,7 @@ namespace Onto_PrealignDataLib
                     RegexOptions.IgnoreCase);
 
                 // CS0165 오류가 해결됨
-                foreach (Match m in rex.Matches(addedText)) 
+                foreach (Match m in rex.Matches(addedText))
                 {
                     DateTime ts;
                     bool ok = DateTime.TryParseExact(

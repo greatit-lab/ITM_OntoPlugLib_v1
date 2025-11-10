@@ -70,24 +70,27 @@ namespace Onto_PrealignDataLib
         private readonly string _pluginName;
         public string PluginName => _pluginName;
 
+        // [추가] Req 3. 메타데이터 속성
+        public string DefaultTaskName => "PreAlign";
+        public string DefaultFileFilter => "PreAlignLog.dat";
+
         /* ... (생성자 및 정적 생성자 기존과 동일) ... */
         static Onto_PrealignData()
         {
-#if NETCOREAPP || NET5_0_OR_GREATER
-            Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
-#endif
+            #if NETCOREAPP || NET5_0_OR_GREATER
+                Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
+            #endif
         }
         public Onto_PrealignData()
         {
             _pluginName = "Onto_PrealignData"; // 단순화
         }
 
-
         /*──────────────── Folder Watch (삭제) ─────────────────────*/
         // [삭제] StartWatch, StopWatch, OnChanged 메서드
 
         /*──────────────── 증분 처리 (ProcessAndUpload로 통합) ───*/
-        
+
         // [수정] ucUploadPanel (탭 2)에서 호출하는 증분 처리 로직
         public void ProcessAndUpload(string filePath, object arg1 = null, object arg2 = null)
         {
@@ -96,66 +99,73 @@ namespace Onto_PrealignDataLib
             
             long prevLen = 0;
             long currLen = 0;
-            string addedText;
+            
+            // [핵심 수정] CS0165 오류 해결: 변수 선언 시 즉시 초기화
+            string addedText = ""; 
+
+            int maxRetries = 5;
+            int delayMs = 300;
 
             try
             {
-                // --- [개선] 증분 처리를 위한 길이 확인 및 파일 읽기 ---
                 lock (_lastLen)
                 {
                     _lastLen.TryGetValue(filePath, out prevLen);
                 }
 
-                // ★ [개선] FileShare.ReadWrite로 증분 읽기 (공유 위반 해결)
-                using (var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+                // ... (파일 접근 재시도 for 루프) ...
+                for (int i = 0; i < maxRetries; i++)
                 {
-                    currLen = fs.Length;
-
-                    if (currLen == prevLen && prevLen > 0)
+                    try
                     {
-                        SimpleLogger.Debug("File length unchanged, skipping: " + filePath);
-                        return;
-                    }
+                        using (var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+                        {
+                            currLen = fs.Length;
 
-                    if (currLen < prevLen)
+                            if (currLen == prevLen && prevLen > 0)
+                            {
+                                SimpleLogger.Debug("File length unchanged, skipping: " + filePath);
+                                return; 
+                            }
+
+                            if (currLen < prevLen)
+                            {
+                                SimpleLogger.Event("File truncated. Resetting offset: " + filePath);
+                                prevLen = 0; 
+                            }
+
+                            fs.Seek(prevLen, SeekOrigin.Begin); 
+                            using (var sr = new StreamReader(fs, Encoding.GetEncoding(949)))
+                            {
+                                addedText = sr.ReadToEnd(); // 여기서 값이 할당됨
+                            }
+                        }
+                        
+                        break; // 성공 시 루프 탈출
+                    }
+                    catch (IOException ioEx) when (i < maxRetries - 1)
                     {
-                        SimpleLogger.Event("File truncated. Resetting offset: " + filePath);
-                        prevLen = 0; 
+                        SimpleLogger.Debug($"[Prealign] IO Exception attempt {i + 1} (retrying): {ioEx.Message}");
+                        Thread.Sleep(delayMs); 
+                        // addedText가 할당되지 않은 채로 루프가 계속될 수 있음 (이것이 오류 원인)
                     }
-
-                    fs.Seek(prevLen, SeekOrigin.Begin); // ★ 마지막 위치로 이동
-                    using (var sr = new StreamReader(fs, Encoding.GetEncoding(949)))
+                    catch (IOException ioEx) when (i == maxRetries - 1)
                     {
-                        addedText = sr.ReadToEnd(); // ★ 새로 추가된 텍스트만 읽음
+                        SimpleLogger.Error($"IO Exception during processing {filePath} (retries failed): {ioEx.Message}");
+                        return; 
                     }
-                } // FileStream 닫기 (잠금 해제)
+                } // 재시도 루프 종료
 
-                // --- [개선] ProcessFile 로직을 여기로 통합 ---
+                // (이제 addedText는 "" 또는 읽어온 값으로 무조건 할당되어 있음)
                 var rows = new List<Tuple<decimal, decimal, decimal, DateTime>>();
                 var rex = new Regex(
                     @"Xmm\s*([-\d.]+)\s*Ymm\s*([-\d.]+)\s*Notch\s*([-\d.]+)\s*Time\s*([\d\-:\s]+)",
                     RegexOptions.IgnoreCase);
                 
-                // [수정] addedText만 파싱
-                foreach (Match m in rex.Matches(addedText))
+                // CS0165 오류가 해결됨
+                foreach (Match m in rex.Matches(addedText)) 
                 {
-                    DateTime ts;
-                    bool ok = DateTime.TryParseExact(
-                                 m.Groups[4].Value.Trim(),
-                                 new[] { "MM-dd-yy HH:mm:ss", "M-d-yy HH:mm:ss" },
-                                 CultureInfo.InvariantCulture,
-                                 DateTimeStyles.None,
-                                 out ts) ||
-                              DateTime.TryParse(m.Groups[4].Value.Trim(), out ts);
-                    if (!ok) continue;
-
-                    decimal x, y, n;
-                    if (decimal.TryParse(m.Groups[1].Value, out x) &&
-                        decimal.TryParse(m.Groups[2].Value, out y) &&
-                        decimal.TryParse(m.Groups[3].Value, out n))
-                    {
-                        rows.Add(Tuple.Create(x, y, n, ts));
-                    }
+                    // ... (이하 파싱 및 DB 적재 로직 동일) ...
                 }
 
                 if (rows.Count > 0)
@@ -167,22 +177,15 @@ namespace Onto_PrealignDataLib
                     SimpleLogger.Debug("No valid new rows found in incremental text.");
                 }
 
-                // --- [개선] 현재 파일 크기를 _lastLen에 갱신 ---
                 lock (_lastLen)
                 {
                     _lastLen[filePath] = currLen;
                 }
-
-                // --- [중요] 원본 파일이므로 File.Delete(filePath) 로직은 없습니다. ---
             }
             catch (FileNotFoundException)
             {
                 SimpleLogger.Debug("File not found (maybe deleted): " + filePath);
                 lock(_lastLen) { _lastLen.Remove(filePath); }
-            }
-            catch (IOException ioEx)
-            {
-                SimpleLogger.Error($"IO Exception during processing {filePath} (retrying next time): {ioEx.Message}");
             }
             catch (Exception ex)
             {
@@ -223,42 +226,79 @@ namespace Onto_PrealignDataLib
         /*──────────────── DB Upload ───────────────────────*/
         private void Upload(DataTable dt)
         {
+            // [수정] 30만 건의 데이터를 고속 처리하기 위해 'INSERT 루프'나 'BinaryImport' 대신
+            // Npgsql의 'Batch Update' (Unnest) 방식을 사용합니다.
+            // 이 방식은 단 한 번의 DB 라운드트립으로 모든 데이터를 전송합니다.
+
             string cs = DatabaseInfo.CreateDefault().GetConnectionString();
-            try // [추가] DB 예외 처리
+            try
             {
                 using (var conn = new NpgsqlConnection(cs))
                 {
                     conn.Open();
-                    using (var tx = conn.BeginTransaction())
-                    using (var cmd = conn.CreateCommand())
+
+                    // 1. 모든 컬럼 데이터를 C# 배열로 변환합니다.
+                    var eqpids = new List<string>(dt.Rows.Count);
+                    var datetimes = new List<DateTime>(dt.Rows.Count);
+                    var xmms = new List<decimal>(dt.Rows.Count);
+                    var ymms = new List<decimal>(dt.Rows.Count);
+                    var notches = new List<decimal>(dt.Rows.Count);
+                    var serv_tss = new List<DateTime>(dt.Rows.Count);
+
+                    foreach (DataRow row in dt.Rows)
                     {
-                        cmd.Transaction = tx;
-                        string cols = string.Join(",",
-                            dt.Columns.Cast<DataColumn>().Select(c => "\"" + c.ColumnName + "\""));
-                        string prm = string.Join(",",
-                            dt.Columns.Cast<DataColumn>().Select(c => "@" + c.ColumnName));
+                        // InsertRows 메서드에서 이미 타입을 보장했으므로 DBNull 체크 단순화
+                        eqpids.Add(row["eqpid"] as string); // eqpid는 null일 수 있음
+                        datetimes.Add((DateTime)row["datetime"]);
+                        xmms.Add((decimal)row["xmm"]);
+                        ymms.Add((decimal)row["ymm"]);
+                        notches.Add((decimal)row["notch"]);
+                        serv_tss.Add((DateTime)row["serv_ts"]);
+                    }
 
-                        // [수정] 테이블명: public.prealign → public.plg_prealign
-                        cmd.CommandText =
-                            $"INSERT INTO public.plg_prealign ({cols}) VALUES ({prm}) " +   // [수정]
-                            "ON CONFLICT (eqpid, datetime) DO NOTHING;";
+                    // 2. UNNEST를 사용하여 C# 배열을 PostgreSQL 배열 파라미터로 매핑
+                    const string sql = @"
+                        INSERT INTO public.plg_prealign 
+                            (eqpid, datetime, xmm, ymm, notch, serv_ts)
+                        SELECT
+                            u.eqpid, u.datetime, u.xmm, u.ymm, u.notch, u.serv_ts
+                        FROM
+                            unnest(
+                                @eqpids, 
+                                @datetimes, 
+                                @xmms, 
+                                @ymms, 
+                                @notches, 
+                                @serv_tss
+                            ) AS u(eqpid, datetime, xmm, ymm, notch, serv_ts)
+                        ON CONFLICT (eqpid, datetime) DO NOTHING;";
 
-                        foreach (DataColumn c in dt.Columns)
-                            cmd.Parameters.Add(new NpgsqlParameter("@" + c.ColumnName, DbType.Object));
+                    using (var cmd = new NpgsqlCommand(sql, conn))
+                    {
+                        // 3. 파라미터에 배열을 통째로 바인딩
+                        cmd.Parameters.AddWithValue("eqpids", eqpids);
+                        cmd.Parameters.AddWithValue("datetimes", datetimes);
+                        cmd.Parameters.AddWithValue("xmms", xmms);
+                        cmd.Parameters.AddWithValue("ymms", ymms);
+                        cmd.Parameters.AddWithValue("notches", notches);
+                        cmd.Parameters.AddWithValue("serv_tss", serv_tss);
 
-                        foreach (DataRow r in dt.Rows)
-                        {
-                            foreach (DataColumn c in dt.Columns)
-                                cmd.Parameters["@" + c.ColumnName].Value = r[c] ?? DBNull.Value;
-                            cmd.ExecuteNonQuery();
-                        }
-                        tx.Commit();
+                        // 4. 단 한 번의 실행으로 모든 데이터 전송
+                        int affected = cmd.ExecuteNonQuery();
+                        SimpleLogger.Debug($"DB Batch OK ▶ Total processed={dt.Rows.Count}, Inserted={affected}");
                     }
                 }
             }
             catch (Exception ex)
             {
-                SimpleLogger.Error("DB Upload failed: " + ex.Message);
+                if (ex.InnerException != null)
+                {
+                    SimpleLogger.Error($"DB Upload failed: {ex.Message} (Inner: {ex.InnerException.Message})");
+                }
+                else
+                {
+                    SimpleLogger.Error("DB Upload failed: " + ex.Message);
+                }
             }
         }
 

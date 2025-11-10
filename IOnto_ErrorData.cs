@@ -118,7 +118,7 @@ namespace Onto_ErrorDataLib
                         {
                             string allTextForMeta = srMeta.ReadToEnd();
                             allLinesForMeta = allTextForMeta.Split(new[] { "\r\n", "\n" }, StringSplitOptions.RemoveEmptyEntries);
-                            addedLines = allLinesForMeta; 
+                            addedLines = allLinesForMeta;
                         }
                     }
                     // [증분 데이터 처리] (메모리 안정화)
@@ -132,7 +132,7 @@ namespace Onto_ErrorDataLib
                         }
                     }
                 } // FileStream 닫기 (잠금 해제)
-                
+
                 // --- ProcessFile 로직을 여기로 통합 ---
 
                 // [메타데이터 처리] (prevLen == 0일 때만)
@@ -196,7 +196,7 @@ namespace Onto_ErrorDataLib
 
         #endregion
 
-        #region === Core  ===
+        #region === Core ===
         // NormalizeErrorId
         private static string NormalizeErrorId(object v)
         {

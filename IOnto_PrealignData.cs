@@ -96,10 +96,10 @@ namespace Onto_PrealignDataLib
         {
             SimpleLogger.Event("Process (Incremental) ▶ " + filePath);
             string eqpid = GetEqpid(arg1 as string ?? "Settings.ini");
-            
+
             long prevLen = 0;
             long currLen = 0;
-            
+
             // [핵심 수정] CS0165 오류 해결: 변수 선언 시 즉시 초기화
             string addedText = ""; 
 
@@ -125,34 +125,34 @@ namespace Onto_PrealignDataLib
                             if (currLen == prevLen && prevLen > 0)
                             {
                                 SimpleLogger.Debug("File length unchanged, skipping: " + filePath);
-                                return; 
+                                return;
                             }
 
                             if (currLen < prevLen)
                             {
                                 SimpleLogger.Event("File truncated. Resetting offset: " + filePath);
-                                prevLen = 0; 
+                                prevLen = 0;
                             }
 
-                            fs.Seek(prevLen, SeekOrigin.Begin); 
+                            fs.Seek(prevLen, SeekOrigin.Begin);
                             using (var sr = new StreamReader(fs, Encoding.GetEncoding(949)))
                             {
                                 addedText = sr.ReadToEnd(); // 여기서 값이 할당됨
                             }
                         }
-                        
+
                         break; // 성공 시 루프 탈출
                     }
                     catch (IOException ioEx) when (i < maxRetries - 1)
                     {
                         SimpleLogger.Debug($"[Prealign] IO Exception attempt {i + 1} (retrying): {ioEx.Message}");
-                        Thread.Sleep(delayMs); 
+                        Thread.Sleep(delayMs);
                         // addedText가 할당되지 않은 채로 루프가 계속될 수 있음 (이것이 오류 원인)
                     }
                     catch (IOException ioEx) when (i == maxRetries - 1)
                     {
                         SimpleLogger.Error($"IO Exception during processing {filePath} (retries failed): {ioEx.Message}");
-                        return; 
+                        return;
                     }
                 } // 재시도 루프 종료
 
@@ -161,9 +161,9 @@ namespace Onto_PrealignDataLib
                 var rex = new Regex(
                     @"Xmm\s*([-\d.]+)\s*Ymm\s*([-\d.]+)\s*Notch\s*([-\d.]+)\s*Time\s*([\d\-:\s]+)",
                     RegexOptions.IgnoreCase);
-                
+
                 // CS0165 오류가 해결됨
-                foreach (Match m in rex.Matches(addedText)) 
+                foreach (Match m in rex.Matches(addedText))
                 {
                     // ... (이하 파싱 및 DB 적재 로직 동일) ...
                 }

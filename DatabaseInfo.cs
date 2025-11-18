@@ -29,9 +29,8 @@ namespace ConnectInfo
         private static string _cachedDbConnectionString = null;
         private static DateTime _dbCacheLastRead = DateTime.MinValue;
 
-        // ▼▼▼ "공용 키" (EncryptTool/Program.cs의 키와 100% 동일) ▼▼▼
+        // "공용 키" (EncryptTool/Program.cs의 키와 100% 동일)
         private const string AES_COMMON_KEY = "greatit-lab-itm-agent-v1-secret";
-        // ▲▲▲ 완료 ▲▲▲
 
         /// <summary>
         /// Connection.ini 파일 경로 정적 생성자
@@ -74,7 +73,7 @@ namespace ConnectInfo
 
                     // 2. AES 공용 키로 복호화 (평문 연결 문자열)
                     string plainConnectionString = DecryptAES(encryptedDbConfig, AES_COMMON_KEY);
-                    
+
                     _cachedDbConnectionString = plainConnectionString;
                     _dbCacheLastRead = DateTime.Now;
 
@@ -92,7 +91,7 @@ namespace ConnectInfo
 
         // --- 공용 헬퍼 메서드 (Agent가 호출할 수 있도록 public static) ---
 
-        // ▼▼▼ [추가] CS0117 오류의 원인! 누락되었던 래퍼 메서드 ▼▼▼
+        // CS0117 오류의 원인! 누락되었던 래퍼 메서드
         /// <summary>
         /// Connection.ini의 특정 섹션에서 키에 해당하는 값을 읽습니다.
         /// </summary>
@@ -105,7 +104,6 @@ namespace ConnectInfo
             }
             catch { return null; }
         }
-        // ▲▲▲ [추가] 완료 ▲▲▲
 
         /// <summary>
         /// INI 파일 내용을 파싱합니다. (공용)
@@ -113,11 +111,11 @@ namespace ConnectInfo
         public static string ParseIniValue(string fileContent, string section, string key)
         {
             if (string.IsNullOrEmpty(fileContent)) return null;
-            
+
             // (.*)로 빈 값도 허용
             var match = new Regex(
-                @"\[" + Regex.Escape(section) + @"\](?:[^\[]*)?" + 
-                Regex.Escape(key) + @"\s*=\s*(.*)", 
+                @"\[" + Regex.Escape(section) + @"\](?:[^\[]*)?" +
+                Regex.Escape(key) + @"\s*=\s*(.*)",
                 RegexOptions.IgnoreCase | RegexOptions.Singleline
             ).Match(fileContent);
 
@@ -146,7 +144,7 @@ namespace ConnectInfo
                     }
                 }
                 catch (FileNotFoundException) { return null; } // 파일이 없으면 즉시 null 반환
-                catch (IOException) 
+                catch (IOException)
                 {
                     if (sw.ElapsedMilliseconds > timeoutMs)
                         throw new TimeoutException($"Failed to read {path} within {timeoutMs}ms.");
@@ -154,7 +152,7 @@ namespace ConnectInfo
                 }
             }
         }
-        
+
         /// <summary>
         /// 파일 잠김 문제를 회피하며 텍스트를 씁니다. (Agent가 사용)
         /// </summary>
@@ -241,24 +239,24 @@ namespace ConnectInfo
     /// </summary>
     public sealed class FtpsInfo
     {
-        // ▼▼▼ [수정] Config = ... 읽도록 변경 ▼▼▼
+        // Config = ... 읽도록 변경
         private static readonly object _ftpLock = new object();
         private static FtpConfig _cachedFtpConfig = null;
         private static DateTime _ftpCacheLastRead = DateTime.MinValue;
 
-        // ▼▼▼ "공용 키" (DatabaseInfo의 키와 100% 동일) ▼▼▼
-        private const string AES_COMMON_KEY = "greatit-lab-itm-agent-v1-secret";
-        
+        // "공용 키" (DatabaseInfo의 키와 100% 동일)
+        private const string AES_COMMON_KEY = "itm-agent-v1-secret";
+
         private FtpConfig GetFtpConfig()
         {
-             lock (_ftpLock)
+            lock (_ftpLock)
             {
                 // 10초간 캐시된 값 사용
                 if (_cachedFtpConfig != null && (DateTime.Now - _ftpCacheLastRead).TotalSeconds < 10)
                 {
                     return _cachedFtpConfig;
                 }
-                
+
                 try
                 {
                     string configPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Connection.ini");

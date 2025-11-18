@@ -10,6 +10,18 @@ using Newtonsoft.Json; // (FTP 정보 JSON 역직렬화)
 
 namespace ConnectInfo
 {
+    /// <summary>
+    /// [추가] 솔루션 전체에서 공유되는 암호화 키를 중앙에서 관리합니다.
+    /// </summary>
+    public static class AgentCryptoConfig
+    {
+        /// <summary>
+        /// Connection.ini 암/복호화를 위한 공용 키입니다.
+        /// 이 값을 변경하면 반드시 EncryptTool을 다시 빌드해야 합니다.
+        /// </summary>
+        public const string AES_COMMON_KEY = "itm-agent-v1-secret";
+    }
+
     // (FTP 정보 역직렬화를 위한 내부 클래스)
     internal class FtpConfig
     {
@@ -28,9 +40,6 @@ namespace ConnectInfo
         private static readonly object _dbLock = new object();
         private static string _cachedDbConnectionString = null;
         private static DateTime _dbCacheLastRead = DateTime.MinValue;
-
-        // "공용 키" (EncryptTool/Program.cs의 키와 100% 동일)
-        private const string AES_COMMON_KEY = "itm-agent-v1-secret";
 
         /// <summary>
         /// Connection.ini 파일 경로 정적 생성자
@@ -72,7 +81,7 @@ namespace ConnectInfo
                         throw new InvalidOperationException("[Database] Config not found in Connection.ini.");
 
                     // 2. AES 공용 키로 복호화 (평문 연결 문자열)
-                    string plainConnectionString = DecryptAES(encryptedDbConfig, AES_COMMON_KEY);
+                    string plainConnectionString = DecryptAES(encryptedDbConfig, AgentCryptoConfig.AES_COMMON_KEY);
 
                     _cachedDbConnectionString = plainConnectionString;
                     _dbCacheLastRead = DateTime.Now;
@@ -244,9 +253,6 @@ namespace ConnectInfo
         private static FtpConfig _cachedFtpConfig = null;
         private static DateTime _ftpCacheLastRead = DateTime.MinValue;
 
-        // "공용 키" (DatabaseInfo의 키와 100% 동일)
-        private const string AES_COMMON_KEY = "itm-agent-v1-secret";
-
         private FtpConfig GetFtpConfig()
         {
             lock (_ftpLock)
@@ -263,16 +269,15 @@ namespace ConnectInfo
                     // string configPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Connection.ini");
                     // string content = DatabaseInfo.ReadAllTextSafe(configPath);
 
-                    // ▼▼▼ [수정] 올바른 헬퍼 메서드 호출 ▼▼▼
+                    // 올바른 헬퍼 메서드 호출
                     // (GetIniValue는 내부적으로 ReadAllTextSafe와 ParseIniValue를 호출함)
                     string encryptedFtpConfig = DatabaseInfo.GetIniValue("Ftps", "Config");
-                    // ▲▲▲ [수정] 완료 ▲▲▲
 
                     if (string.IsNullOrEmpty(encryptedFtpConfig))
                         throw new InvalidOperationException("[Ftps] Config not found in Connection.ini.");
 
                     // AES 공용 키로 복호화 (평문 JSON)
-                    string plainJson = DecryptAES_Internal(encryptedFtpConfig, AES_COMMON_KEY);
+                    string plainJson = DecryptAES_Internal(encryptedFtpConfig, AgentCryptoConfig.AES_COMMON_KEY);
 
                     // JSON 역직렬화
                     _cachedFtpConfig = JsonConvert.DeserializeObject<FtpConfig>(plainJson);
@@ -287,7 +292,7 @@ namespace ConnectInfo
                 }
             }
         }
-        
+
         // 속성(Property)이 GetFtpConfig()를 호출하도록 변경
         public string Host => GetFtpConfig()?.Host;
         public int Port => GetFtpConfig()?.Port ?? 21;

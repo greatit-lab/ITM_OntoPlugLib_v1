@@ -30,7 +30,7 @@ namespace ConnectInfo
         private static DateTime _dbCacheLastRead = DateTime.MinValue;
 
         // "공용 키" (EncryptTool/Program.cs의 키와 100% 동일)
-        private const string AES_COMMON_KEY = "greatit-lab-itm-agent-v1-secret";
+        private const string AES_COMMON_KEY = "itm-agent-v1-secret";
 
         /// <summary>
         /// Connection.ini 파일 경로 정적 생성자
@@ -259,21 +259,25 @@ namespace ConnectInfo
 
                 try
                 {
-                    string configPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Connection.ini");
-                    string content = DatabaseInfo.ReadAllTextSafe(configPath);
-                    // ▼▼▼ [수정] DatabaseInfo.ParseIniValue 헬퍼 사용 ▼▼▼
-                    string encryptedFtpConfig = DatabaseInfo.ParseIniValue(content, "Ftps", "Config");
-                    
+                    // (Connection.ini 경로는 DatabaseInfo 클래스의 정적 필드 _configPath를 사용)
+                    // string configPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Connection.ini");
+                    // string content = DatabaseInfo.ReadAllTextSafe(configPath);
+
+                    // ▼▼▼ [수정] 올바른 헬퍼 메서드 호출 ▼▼▼
+                    // (GetIniValue는 내부적으로 ReadAllTextSafe와 ParseIniValue를 호출함)
+                    string encryptedFtpConfig = DatabaseInfo.GetIniValue("Ftps", "Config");
+                    // ▲▲▲ [수정] 완료 ▲▲▲
+
                     if (string.IsNullOrEmpty(encryptedFtpConfig))
                         throw new InvalidOperationException("[Ftps] Config not found in Connection.ini.");
-                        
+
                     // AES 공용 키로 복호화 (평문 JSON)
                     string plainJson = DecryptAES_Internal(encryptedFtpConfig, AES_COMMON_KEY);
-                    
+
                     // JSON 역직렬화
                     _cachedFtpConfig = JsonConvert.DeserializeObject<FtpConfig>(plainJson);
                     _ftpCacheLastRead = DateTime.Now;
-                    
+
                     return _cachedFtpConfig;
                 }
                 catch (Exception ex)
@@ -284,20 +288,17 @@ namespace ConnectInfo
             }
         }
         
-        // ▲▲▲ [수정] 완료 ▲▲▲
-        
-        // ▼▼▼ [수정] 속성(Property)이 GetFtpConfig()를 호출하도록 변경 ▼▼▼
+        // 속성(Property)이 GetFtpConfig()를 호출하도록 변경
         public string Host => GetFtpConfig()?.Host;
         public int Port => GetFtpConfig()?.Port ?? 21;
         public string Username => GetFtpConfig()?.Username;
         public string Password => GetFtpConfig()?.Password;
         public string UploadPath => "/"; // (요청사항: 하드 코딩)
-        // ▲▲▲ [수정] 완료 ▲▲▲
 
         private FtpsInfo() { }
         public static FtpsInfo CreateDefault() => new FtpsInfo();
 
-        // ▼▼▼ [추가] FtpsInfo 전용 DecryptAES 헬퍼 (DatabaseInfo의 것과 100% 동일) ▼▼▼
+        // FtpsInfo 전용 DecryptAES 헬퍼 (DatabaseInfo의 것과 100% 동일)
         private static string DecryptAES_Internal(string cipherText, string keyString)
         {
             byte[] fullCipher = Convert.FromBase64String(cipherText);
@@ -325,6 +326,5 @@ namespace ConnectInfo
                 }
             }
         }
-        // ▲▲▲ [추가] 완료 ▲▲▲
     }
 }

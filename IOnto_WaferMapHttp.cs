@@ -68,7 +68,7 @@ namespace Onto_WaferMapHttpLib
             {
                 // 1. 현재 활성화된(Connection.ini에 설정된) DB 연결 문자열 가져오기
                 string connString = DatabaseInfo.CreateDefault().GetConnectionString();
-                
+
                 // 2. 연결 문자열 파싱 (Npgsql 빌더 활용)
                 var builder = new NpgsqlConnectionStringBuilder(connString);
                 string host = builder.Host; // 현재 DB 서버의 IP
@@ -111,7 +111,7 @@ namespace Onto_WaferMapHttpLib
                 if (!isServerHealthy)
                 {
                     SimpleLogger.Error($"API server health check failed ({currentApiUrl}). Aborting.");
-                    return; 
+                    return;
                 }
 
                 // 2. SDWT 조회
@@ -132,7 +132,7 @@ namespace Onto_WaferMapHttpLib
 
                     // 5. DB 적재
                     InsertToDatabase(filePath, eqpid, fullUri);
-                    
+
                     // 6. 삭제
                     TryDeleteLocalFile(filePath);
 

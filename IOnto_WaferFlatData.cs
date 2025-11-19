@@ -13,7 +13,7 @@ using ITM_Agent.Services;
 
 namespace Onto_WaferFlatDataLib
 {
-    /*──────────────────────── Logger (개선 버전) ────────────────────────*/
+    /*──────────────────────── Logger ────────────────────────*/
     internal static class SimpleLogger
     {
         private static volatile bool _debugEnabled = false;
@@ -44,7 +44,7 @@ namespace Onto_WaferFlatDataLib
 
                     string filePath = GetPath(suffix);
                     string line = $"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} " +
-                                      $"[Onto_WaferFlatData] {msg}{Environment.NewLine}";
+                                      $"[WaferFlat] {msg}{Environment.NewLine}";
 
                     const int MAX_RETRY = 3;
                     for (int i = 1; i <= MAX_RETRY; i++)
@@ -79,7 +79,16 @@ namespace Onto_WaferFlatDataLib
 
     public class Onto_WaferFlatData : IOnto_WaferFlatData
     {
+        public string PluginName => "Onto_WaferFlatData";
         public string DefaultTaskName => "WaferFlat";
+
+        // ★ [필수 추가] Agent에게 "나는 이름 변경(Override) 작업이 필요해"라고 알리는 속성
+        public bool RequiresOverrideNames => true;
+
+        static Onto_WaferFlatData()
+        {
+            Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
+        }
 
         private static string ReadAllTextSafe(string path, Encoding enc, int timeoutMs = 30000)
         {
@@ -98,19 +107,10 @@ namespace Onto_WaferFlatDataLib
                 {
                     if (sw.ElapsedMilliseconds > timeoutMs)
                         throw;
-                    System.Threading.Thread.Sleep(500);
+                    Thread.Sleep(500);
                 }
             }
         }
-
-        static Onto_WaferFlatData()
-        {
-            Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
-        }
-
-        public string PluginName => "Onto_WaferFlatData";
-
-        #region === 외부 호출 ===
 
         public void ProcessAndUpload(string filePath, object settingsFilePath = null, object arg2 = null)
         {
@@ -132,7 +132,6 @@ namespace Onto_WaferFlatDataLib
                 SimpleLogger.Error($"Unhandled EX ▶ {ex.GetBaseException().Message}");
             }
         }
-        #endregion
 
         private bool WaitForFileReady(string path, int maxRetries = 10, int delayMs = 500)
         {
@@ -282,10 +281,8 @@ namespace Onto_WaferFlatDataLib
             try { File.Delete(filePath); } catch { /* ignore */ }
         }
 
-        #region === DB Upload (Batch UNNEST 방식으로 수정) ===
         private void UploadToSQL(DataTable dt, string srcFile)
         {
-            // (1) serv_ts, eqpid 컬럼 추가 로직 (기존과 동일)
             if (!dt.Columns.Contains("serv_ts"))
                 dt.Columns.Add("serv_ts", typeof(DateTime));
 
@@ -304,7 +301,6 @@ namespace Onto_WaferFlatDataLib
             {
                 conn.Open();
 
-                // (2) 칼럼 확인 및 추가 로직 (기존과 동일)
                 try
                 {
                     var existingColumns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -332,29 +328,25 @@ namespace Onto_WaferFlatDataLib
                     {
                         foreach (string colName in missingColumns)
                         {
-                            string alterSql = $"ALTER TABLE public.plg_wf_flat ADD COLUMN \"{colName}\" REAL NULL;";
+                            string alterSql = $"ALTER TABLE public.plg_wf_flat ADD COLUMN \"{colName}\" DOUBLE PRECISION NULL;";
                             using (var cmdAlter = new NpgsqlCommand(alterSql, conn))
                             {
                                 cmdAlter.ExecuteNonQuery();
-                                SimpleLogger.Event($"Added missing column to plg_wf_flat: {colName} (Type: REAL)");
+                                SimpleLogger.Event($"Added missing column: {colName}");
                             }
                         }
                     }
                 }
                 catch (Exception exSchema)
                 {
-                    SimpleLogger.Error($"Failed to check/add columns for plg_wf_flat: {exSchema.Message}");
+                    SimpleLogger.Error($"Schema check failed: {exSchema.Message}");
                     return;
                 }
-                // --- 칼럼 확인 및 추가 로직 끝 ---
 
-                // ▼▼▼ [핵심 수정] System.Object 및 중복 데이터 문제 동시 해결 ▼▼▼
                 using (var tx = conn.BeginTransaction())
                 {
                     try
                     {
-                        // (3.0) [추가] 중복 데이터 위험 제거 (Req 2)
-                        // INSERT 전에 이 파일에 해당하는 (eqpid, datetime)의 기존 데이터를 삭제
                         if (dt.Rows.Count > 0)
                         {
                             string eqpid = dt.Rows[0]["eqpid"] as string;
@@ -367,14 +359,11 @@ namespace Onto_WaferFlatDataLib
                                 {
                                     cmdDelete.Parameters.AddWithValue("eqpid", eqpid);
                                     cmdDelete.Parameters.AddWithValue("datetime", datetime);
-                                    int deleted = cmdDelete.ExecuteNonQuery();
-                                    if (deleted > 0)
-                                        SimpleLogger.Debug($"Deleted {deleted} existing rows for (eqpid={eqpid}, datetime={datetime}) before insert.");
+                                    cmdDelete.ExecuteNonQuery();
                                 }
                             }
                         }
 
-                        // (3.1) [수정] System.Object 오류 해결: 타입별 리스트 생성
                         var cols = dt.Columns.Cast<DataColumn>().Select(c => c.ColumnName).ToArray();
                         string colList = string.Join(",", cols.Select(c => $"\"{c}\""));
                         string unnestFields = string.Join(",", cols.Select(c => $"u.\"{c}\""));
@@ -383,11 +372,9 @@ namespace Onto_WaferFlatDataLib
                         string sql = $"INSERT INTO public.plg_wf_flat ({colList}) " +
                                      $"SELECT {unnestFields} FROM unnest({unnestParams}) " +
                                      $"AS u({colList})";
-                        // (ON CONFLICT 제거 - 42P10 오류 및 중복 위험 해결)
 
                         using (var cmd = new NpgsqlCommand(sql, conn, tx))
                         {
-                            // (3.2) strongly-typed 리스트 생성
                             var stringLists = new Dictionary<string, List<string>>();
                             var intLists = new Dictionary<string, List<int?>>();
                             var doubleLists = new Dictionary<string, List<double?>>();
@@ -397,68 +384,47 @@ namespace Onto_WaferFlatDataLib
                             var dateTimeCols = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "datetime", "serv_ts" };
                             var stringCols = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "cassettercp", "stagercp", "stagegroup", "lotid", "film", "eqpid" };
 
-                            // (3.3) 리스트 초기화
                             foreach (string c in cols)
                             {
-                                if (stringCols.Contains(c))
-                                    stringLists[c] = new List<string>(dt.Rows.Count);
-                                else if (intCols.Contains(c))
-                                    intLists[c] = new List<int?>(dt.Rows.Count);
-                                else if (dateTimeCols.Contains(c))
-                                    dateTimeLists[c] = new List<DateTime?>(dt.Rows.Count);
-                                else
-                                    doubleLists[c] = new List<double?>(dt.Rows.Count);
+                                if (stringCols.Contains(c)) stringLists[c] = new List<string>(dt.Rows.Count);
+                                else if (intCols.Contains(c)) intLists[c] = new List<int?>(dt.Rows.Count);
+                                else if (dateTimeCols.Contains(c)) dateTimeLists[c] = new List<DateTime?>(dt.Rows.Count);
+                                else doubleLists[c] = new List<double?>(dt.Rows.Count);
                             }
 
-                            // (3.4) 데이터 채우기 (Strongly-typed)
                             foreach (DataRow r in dt.Rows)
                             {
                                 foreach (var entry in stringLists) entry.Value.Add(r[entry.Key] == DBNull.Value ? null : (string)r[entry.Key]);
                                 foreach (var entry in intLists) entry.Value.Add(r[entry.Key] == DBNull.Value ? (int?)null : Convert.ToInt32(r[entry.Key]));
                                 foreach (var entry in dateTimeLists) entry.Value.Add(r[entry.Key] == DBNull.Value ? (DateTime?)null : (DateTime)r[entry.Key]);
-                                // [수정] REAL 타입(float/Single) 대신 DB가 지원하는 DOUBLE(double/Double)로 전송
                                 foreach (var entry in doubleLists) entry.Value.Add(r[entry.Key] == DBNull.Value ? (double?)null : Convert.ToDouble(r[entry.Key]));
                             }
 
-                            // (3.5) 파라미터 바인딩 (Strongly-typed Lists)
                             foreach (var entry in stringLists) cmd.Parameters.AddWithValue("@" + entry.Key, entry.Value);
                             foreach (var entry in intLists) cmd.Parameters.AddWithValue("@" + entry.Key, entry.Value);
                             foreach (var entry in dateTimeLists) cmd.Parameters.AddWithValue("@" + entry.Key, entry.Value);
                             foreach (var entry in doubleLists) cmd.Parameters.AddWithValue("@" + entry.Key, entry.Value);
 
-                            cmd.CommandTimeout = 300; // 5분
+                            cmd.CommandTimeout = 300;
                             int affected = cmd.ExecuteNonQuery();
-                            SimpleLogger.Debug($"DB Batch OK ▶ Total={dt.Rows.Count}, Inserted={affected} (Source: {srcFile})");
+                            SimpleLogger.Debug($"DB Batch OK ▶ Inserted={affected}");
                         }
                         tx.Commit();
-                    }
-                    catch (PostgresException pex)
-                    {
-                        tx.Rollback();
-                        var sb = new StringBuilder()
-                            .AppendLine($"PG CODE = {pex.SqlState}")
-                            .AppendLine($"Message  = {pex.Message}")
-                            .AppendLine($"Detail   = {pex.Detail}");
-                        SimpleLogger.Error("DB FAIL (PostgresException) ▶ " + sb);
                     }
                     catch (Exception ex)
                     {
                         tx.Rollback();
-                        SimpleLogger.Error("DB FAIL (General Exception) ▶ " + ex);
+                        SimpleLogger.Error("DB FAIL ▶ " + ex.Message);
                     }
                 }
             }
         }
-        #endregion
 
-        #region === Eqpid 읽기 ===
         private string GetEqpidFromSettings(string iniPath)
         {
             string path = iniPath ?? "Settings.ini";
             if (!Path.IsPathRooted(path))
-            {
                 path = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, path);
-            }
 
             if (!File.Exists(path)) return "";
             try
@@ -478,6 +444,5 @@ namespace Onto_WaferFlatDataLib
             }
             return "";
         }
-        #endregion
     }
 }

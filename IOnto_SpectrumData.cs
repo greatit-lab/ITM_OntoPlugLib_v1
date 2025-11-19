@@ -95,11 +95,11 @@ namespace Onto_SpectrumDataLib
                 var data = ParseFileContent(filePath);
                 if (data == null || data.Wavelengths.Count == 0) return;
 
-                _batchQueue.Enqueue(new BatchItem 
-                { 
-                    FilePath = filePath, 
-                    Meta = meta, 
-                    Data = data 
+                _batchQueue.Enqueue(new BatchItem
+                {
+                    FilePath = filePath,
+                    Meta = meta,
+                    Data = data
                 });
 
                 if (_batchQueue.Count >= BATCH_SIZE)
@@ -153,7 +153,7 @@ namespace Onto_SpectrumDataLib
         private static bool BulkInsert(List<BatchItem> items)
         {
             string connString = DatabaseInfo.CreateDefault().GetConnectionString();
-            
+
             try
             {
                 using (var conn = new NpgsqlConnection(connString))

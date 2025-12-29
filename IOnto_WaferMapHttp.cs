@@ -54,7 +54,7 @@ namespace Onto_WaferMapHttpLib
         // private const string ApiBaseUrl = "http://192.168.0.10:8080"; 
 
         // [추가] 포트 번호는 변경될 일이 적으므로 상수로 관리 (필요시 이것도 DB에서 가져올 수 있음)
-        private const int ApiPort = 8080;
+        private const int ApiPort = 8082;
 
         public string PluginName => "Onto_WaferMapHttp";
         public string DefaultTaskName => "WaferMap";

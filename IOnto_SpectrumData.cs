@@ -81,7 +81,8 @@ namespace Onto_SpectrumDataLib
         {
             if (!WaitForFileReady(filePath))
             {
-                SimpleLogger.Error($"File locked or not found: {filePath}");
+                // [수정] 파일 잠김/미존재는 Debug 로그로 전환하여 error.log 오염 방지
+                SimpleLogger.Debug($"File locked or not found (Skipping): {filePath}");
                 return;
             }
 
@@ -106,6 +107,11 @@ namespace Onto_SpectrumDataLib
                 {
                     Task.Run(() => FlushQueue());
                 }
+            }
+            catch (IOException ioEx)
+            {
+                // [수정] IO 예외(파일 잠김 등)는 Debug 로그로 처리
+                SimpleLogger.Debug($"Process Locked (IOException): {ioEx.Message}");
             }
             catch (Exception ex)
             {

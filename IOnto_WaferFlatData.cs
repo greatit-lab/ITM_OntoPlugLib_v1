@@ -82,7 +82,6 @@ namespace Onto_WaferFlatDataLib
         public string PluginName => "Onto_WaferFlatData";
         public string DefaultTaskName => "WaferFlat";
 
-        // ★ [필수 추가] Agent에게 "나는 이름 변경(Override) 작업이 필요해"라고 알리는 속성
         public bool RequiresOverrideNames => true;
 
         static Onto_WaferFlatData()
@@ -286,14 +285,21 @@ namespace Onto_WaferFlatDataLib
             if (!dt.Columns.Contains("serv_ts"))
                 dt.Columns.Add("serv_ts", typeof(DateTime));
 
+            // [수정] serv_ts 생성 시 초 단위 이하 절삭 로직 적용
             foreach (DataRow r in dt.Rows)
             {
                 if (r["datetime"] != DBNull.Value)
                 {
                     DateTime ts = (DateTime)r["datetime"];
-                    r["serv_ts"] = ITM_Agent.Services.TimeSyncProvider.Instance.ToSynchronizedKst(ts);
+                    DateTime kst = ITM_Agent.Services.TimeSyncProvider.Instance.ToSynchronizedKst(ts);
+                    
+                    // 밀리초 제거 (yyyy-MM-dd HH:mm:ss 형식 보장)
+                    r["serv_ts"] = new DateTime(kst.Year, kst.Month, kst.Day, kst.Hour, kst.Minute, kst.Second);
                 }
-                else r["serv_ts"] = DBNull.Value;
+                else 
+                {
+                    r["serv_ts"] = DBNull.Value;
+                }
             }
 
             var dbInfo = DatabaseInfo.CreateDefault();

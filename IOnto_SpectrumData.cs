@@ -95,7 +95,7 @@ namespace Onto_SpectrumDataLib
                 {
                     // 파싱 실패 시 로그 남기고 종료 (빈 리턴 방지)
                     SimpleLogger.Debug($"Filename parse failed: {Path.GetFileName(filePath)}");
-                    return; 
+                    return;
                 }
 
                 meta.EqpId = GetEqpidFromSettings(settingsPathObj as string);
@@ -296,11 +296,11 @@ namespace Onto_SpectrumDataLib
 
                 // 3. LotID 추출 (WaferID 바로 앞의 1~2개 덩어리만 확인)
                 // "31PT" 같은게 앞에 있어도, WaferID 바로 앞만 보기 때문에 무시됨
-                
+
                 if (waferIndex >= 2)
                 {
                     string prev1 = parts[waferIndex - 1]; // Wafer 바로 앞 (예: "1" 또는 "AAA001" 또는 "LOT123")
-                    
+
                     // [판단 로직] 바로 앞이 "숫자"로만 구성되어 있다면 -> 분리된 LotID의 뒷부분(Suffix)임
                     if (Regex.IsMatch(prev1, @"^\d+$"))
                     {
@@ -320,7 +320,7 @@ namespace Onto_SpectrumDataLib
                 else if (waferIndex == 1)
                 {
                     // 구조상 거의 없겠지만 예외 처리
-                    meta.LotId = parts[0]; 
+                    meta.LotId = parts[0];
                 }
                 else
                 {
@@ -370,7 +370,7 @@ namespace Onto_SpectrumDataLib
                     line = line.Trim();
                     if (string.IsNullOrWhiteSpace(line)) continue;
 
-                    if (line.StartsWith("sR", StringComparison.OrdinalIgnoreCase) || 
+                    if (line.StartsWith("sR", StringComparison.OrdinalIgnoreCase) ||
                         line.StartsWith("uR", StringComparison.OrdinalIgnoreCase))
                     {
                         var tokens = line.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
@@ -379,20 +379,20 @@ namespace Onto_SpectrumDataLib
                             result.PolType = tokens[0];
                             if (float.TryParse(tokens[1], out float nm) && float.TryParse(tokens[3], out float val))
                             {
-                                if (!angleFound && float.TryParse(tokens[2], out float ang)) 
-                                { 
-                                    result.AngleVal = ang; 
-                                    angleFound = true; 
+                                if (!angleFound && float.TryParse(tokens[2], out float ang))
+                                {
+                                    result.AngleVal = ang;
+                                    angleFound = true;
                                 }
-                                
+
                                 result.Wavelengths.Add(nm);
                                 result.Values.Add(val);
 
                                 float diff = Math.Abs(nm - TARGET_WAVELENGTH);
-                                if (diff < minDiff) 
-                                { 
-                                    minDiff = diff; 
-                                    result.ValSummary = val; 
+                                if (diff < minDiff)
+                                {
+                                    minDiff = diff;
+                                    result.ValSummary = val;
                                 }
                             }
                         }
@@ -406,12 +406,12 @@ namespace Onto_SpectrumDataLib
         {
             string path = iniPath ?? Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Settings.ini");
             if (!File.Exists(path)) return "UNKNOWN";
-            try 
-            { 
-                foreach (var line in File.ReadAllLines(path)) 
-                    if (line.Trim().StartsWith("Eqpid", StringComparison.OrdinalIgnoreCase)) 
-                        return line.Split('=')[1].Trim(); 
-            } 
+            try
+            {
+                foreach (var line in File.ReadAllLines(path))
+                    if (line.Trim().StartsWith("Eqpid", StringComparison.OrdinalIgnoreCase))
+                        return line.Split('=')[1].Trim();
+            }
             catch { }
             return "UNKNOWN";
         }

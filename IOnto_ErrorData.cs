@@ -54,15 +54,13 @@ namespace Onto_ErrorDataLib
 
     public class Onto_ErrorData : IOnto_ErrorData
     {
-        // [핵심] 증분 처리를 위한 마지막 파일 크기(Offset) 저장소
-        // static으로 선언되어 Agent가 재시작되지 않는 한 메모리에 유지됩니다.
+        // 증분 처리를 위한 마지막 파일 크기(Offset) 저장소
         private static readonly Dictionary<string, long> _lastLen =
             new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
 
         private readonly string _pluginName = "Onto_ErrorData";
         public string PluginName { get { return _pluginName; } }
 
-        // [추가] Req 3. 메타데이터 속성 (Agent가 리플렉션으로 이 이름을 찾아 읽음)
         public string DefaultTaskName => "Error";
         public string DefaultFileFilter => "*Error.dat";
 
@@ -75,7 +73,6 @@ namespace Onto_ErrorDataLib
 
         #region === Public API ===
 
-        // ucUploadPanel (탭 2)에서 호출하는 증분 처리 로직
         public void ProcessAndUpload(string filePath, object arg1 = null, object arg2 = null)
         {
             SimpleLogger.Event("Process (Incremental) ▶ " + filePath);
@@ -94,7 +91,6 @@ namespace Onto_ErrorDataLib
                     _lastLen.TryGetValue(filePath, out prevLen);
                 }
 
-                // FileShare.ReadWrite로 증분 읽기 (공유 위반 해결)
                 using (var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
                 {
                     currLen = fs.Length;
@@ -108,10 +104,10 @@ namespace Onto_ErrorDataLib
                     if (currLen < prevLen)
                     {
                         SimpleLogger.Event("File truncated (Size decreased). Resetting offset: " + filePath);
-                        prevLen = 0; // 파일이 새로 생성되거나 잘렸으므로 처음부터
+                        prevLen = 0;
                     }
 
-                    // [메타데이터 처리] (prevLen == 0, 즉 최초 실행 시에만)
+                    // [메타데이터 처리] (최초 실행 시에만 전체 읽기)
                     if (prevLen == 0)
                     {
                         using (var srMeta = new StreamReader(fs, Encoding.GetEncoding(949)))
@@ -121,7 +117,7 @@ namespace Onto_ErrorDataLib
                             addedLines = allLinesForMeta;
                         }
                     }
-                    // [증분 데이터 처리] (메모리 안정화)
+                    // [증분 데이터 처리] (이후에는 추가된 부분만 읽기)
                     else
                     {
                         fs.Seek(prevLen, SeekOrigin.Begin);
@@ -131,11 +127,9 @@ namespace Onto_ErrorDataLib
                             addedLines = addedText.Split(new[] { "\r\n", "\n" }, StringSplitOptions.RemoveEmptyEntries);
                         }
                     }
-                } // FileStream 닫기 (잠금 해제)
+                }
 
-                // --- ProcessFile 로직을 여기로 통합 ---
-
-                // [메타데이터 처리] (prevLen == 0일 때만)
+                // [메타데이터 처리]
                 if (prevLen == 0 && allLinesForMeta != null)
                 {
                     var meta = ParseMeta(allLinesForMeta);
@@ -173,7 +167,6 @@ namespace Onto_ErrorDataLib
 
                 SimpleLogger.Event("Done (Incremental) ▶ " + Path.GetFileName(filePath));
 
-                // --- 현재 파일 크기를 _lastLen에 갱신 ---
                 lock (_lastLen)
                 {
                     _lastLen[filePath] = currLen;
@@ -197,7 +190,6 @@ namespace Onto_ErrorDataLib
         #endregion
 
         #region === Core ===
-        // NormalizeErrorId
         private static string NormalizeErrorId(object v)
         {
             if (v == null || v == DBNull.Value) return string.Empty;
@@ -294,19 +286,35 @@ namespace Onto_ErrorDataLib
                               .Instance.ToSynchronizedKst(srcDate);
                 srv = new DateTime(srv.Year, srv.Month, srv.Day, srv.Hour, srv.Minute, srv.Second);
 
-                // [핵심 수정] 42P10 오류 해결: ON CONFLICT 구문 제거
-                // IsInfoChanged()가 중복을 이미 확인했으므로, 단순 INSERT만 수행합니다.
-                const string SQL = @"
+                // ★ [수정] 42P10 오류 해결을 위해 Try-Catch-Update 패턴으로 변경
+                
+                const string INSERT_SQL = @"
                     INSERT INTO public.itm_info
                         (eqpid, system_name, system_model, serial_num, application, version, db_version, ""date"", serv_ts)
                     VALUES
                         (@eqpid, @system_name, @system_model, @serial_num, @application, @version, @db_version, @date, @serv_ts);
                 ";
 
+                const string UPDATE_SQL = @"
+                    UPDATE public.itm_info
+                    SET
+                        system_name = @system_name,
+                        system_model = @system_model,
+                        serial_num = @serial_num,
+                        application = @application,
+                        version = @version,
+                        db_version = @db_version,
+                        ""date"" = @date,
+                        serv_ts = @serv_ts
+                    WHERE eqpid = @eqpid;
+                ";
+
                 using (var conn = new NpgsqlConnection(cs))
                 {
                     conn.Open();
-                    using (var cmd = new NpgsqlCommand(SQL, conn))
+
+                    // 파라미터 세팅 로컬 함수
+                    void SetParams(NpgsqlCommand cmd)
                     {
                         cmd.Parameters.AddWithValue("@eqpid", r["eqpid"] ?? (object)DBNull.Value);
                         cmd.Parameters.AddWithValue("@system_name", r["system_name"] ?? (object)DBNull.Value);
@@ -327,11 +335,29 @@ namespace Onto_ErrorDataLib
                         }
                         cmd.Parameters.AddWithValue("@date", dateParam);
                         cmd.Parameters.AddWithValue("@serv_ts", srv);
+                    }
 
-                        cmd.ExecuteNonQuery();
+                    try
+                    {
+                        // 1. INSERT 시도
+                        using (var cmd = new NpgsqlCommand(INSERT_SQL, conn))
+                        {
+                            SetParams(cmd);
+                            cmd.ExecuteNonQuery();
+                        }
+                        SimpleLogger.Event("itm_info inserted ▶ eqpid=" + (r["eqpid"] ?? ""));
+                    }
+                    catch (PostgresException pgEx) when (pgEx.SqlState == "23505") // 23505: Unique Violation
+                    {
+                        // 2. 중복 발생 시 UPDATE 실행
+                        using (var cmd = new NpgsqlCommand(UPDATE_SQL, conn))
+                        {
+                            SetParams(cmd);
+                            cmd.ExecuteNonQuery();
+                        }
+                        SimpleLogger.Event("itm_info updated (duplicate key) ▶ eqpid=" + (r["eqpid"] ?? ""));
                     }
                 }
-                SimpleLogger.Event("itm_info inserted ▶ eqpid=" + (r["eqpid"] ?? ""));
             }
             catch (Exception ex)
             {
@@ -339,7 +365,6 @@ namespace Onto_ErrorDataLib
             }
         }
 
-        // ParseMeta
         private Dictionary<string, string> ParseMeta(string[] lines)
         {
             var d = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -453,7 +478,6 @@ namespace Onto_ErrorDataLib
         #endregion
 
         #region === DB Helper ===
-        // itm_info 변경 여부 판단
         private bool IsInfoChanged(DataTable dt)
         {
             if (dt == null || dt.Rows.Count == 0) return false;
@@ -486,7 +510,7 @@ namespace Onto_ErrorDataLib
                     cmd.Parameters.AddWithValue("@dbv", r["db_version"] ?? (object)DBNull.Value);
 
                     object o = cmd.ExecuteScalar();
-                    return o == null;
+                    return o == null; 
                 }
             }
         }
@@ -512,11 +536,9 @@ namespace Onto_ErrorDataLib
 
                     using (var cmd = new NpgsqlCommand(sql, conn, tx))
                     {
-                        // [수정] 파라미터 미리 정의
                         foreach (var c in cols)
                         {
                             var param = new NpgsqlParameter("@" + c, DBNull.Value);
-                            // 타입 추론에 맡김 (혹은 DataColumn의 DataType을 NpgsqlDbType으로 매핑)
                             cmd.Parameters.Add(param);
                         }
 
@@ -554,8 +576,6 @@ namespace Onto_ErrorDataLib
         #endregion
 
         #region === Utility ===
-
-        // [수정] WaitForFileReady (공유 읽기/쓰기 모드 확인)
         private bool WaitForFileReady(string path, int maxRetries, int delayMs)
         {
             for (int i = 0; i < maxRetries; i++)
@@ -571,7 +591,6 @@ namespace Onto_ErrorDataLib
                     }
                     catch (IOException)
                     {
-                        // 여전히 잠겨 있음 → 재시도
                     }
                 }
                 Thread.Sleep(delayMs);

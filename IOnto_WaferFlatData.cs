@@ -292,11 +292,11 @@ namespace Onto_WaferFlatDataLib
                 {
                     DateTime ts = (DateTime)r["datetime"];
                     DateTime kst = ITM_Agent.Services.TimeSyncProvider.Instance.ToSynchronizedKst(ts);
-                    
+
                     // 밀리초 제거 (yyyy-MM-dd HH:mm:ss 형식 보장)
                     r["serv_ts"] = new DateTime(kst.Year, kst.Month, kst.Day, kst.Hour, kst.Minute, kst.Second);
                 }
-                else 
+                else
                 {
                     r["serv_ts"] = DBNull.Value;
                 }

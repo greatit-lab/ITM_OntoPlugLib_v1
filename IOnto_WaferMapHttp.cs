@@ -12,7 +12,7 @@ using Npgsql; // NpgsqlConnectionStringBuilder 사용
 
 namespace Onto_WaferMapHttpLib
 {
-    /* (SimpleLogger 클래스는 기존과 동일하므로 생략) */
+    /* (SimpleLogger 클래스는 기존과 동일) */
     internal static class SimpleLogger
     {
         private static volatile bool _debugEnabled = false;
@@ -50,10 +50,7 @@ namespace Onto_WaferMapHttpLib
             Timeout = TimeSpan.FromSeconds(300)
         };
 
-        // [삭제] 하드코딩된 주소 제거
-        // private const string ApiBaseUrl = "http://192.168.0.10:8080"; 
-
-        // [추가] 포트 번호는 변경될 일이 적으므로 상수로 관리 (필요시 이것도 DB에서 가져올 수 있음)
+        // API 포트 번호
         private const int ApiPort = 8082;
 
         public string PluginName => "Onto_WaferMapHttp";
@@ -69,17 +66,16 @@ namespace Onto_WaferMapHttpLib
                 // 1. 현재 활성화된(Connection.ini에 설정된) DB 연결 문자열 가져오기
                 string connString = DatabaseInfo.CreateDefault().GetConnectionString();
 
-                // 2. 연결 문자열 파싱 (Npgsql 빌더 활용)
+                // 2. 연결 문자열 파싱
                 var builder = new NpgsqlConnectionStringBuilder(connString);
                 string host = builder.Host; // 현재 DB 서버의 IP
 
-                // 3. API URL 조합 (예: http://10.0.0.2:8080)
+                // 3. API URL 조합
                 return $"http://{host}:{ApiPort}";
             }
             catch (Exception ex)
             {
                 SimpleLogger.Error($"Failed to derive API URL from DB Connection: {ex.Message}");
-                // 실패 시 기본값 또는 예외 처리 (여기서는 localhost 반환하여 2차 오류 방지)
                 return $"http://127.0.0.1:{ApiPort}";
             }
         }
@@ -100,13 +96,13 @@ namespace Onto_WaferMapHttpLib
                 return;
             }
 
-            // ★ [핵심 변경] 동적 URL 생성
+            // 동적 URL 생성
             string currentApiUrl = GetDynamicApiUrl();
             SimpleLogger.Debug($"Target API URL: {currentApiUrl}");
 
             try
             {
-                // 1. Health Check (동적 URL 사용)
+                // 1. Health Check
                 bool isServerHealthy = CheckServerHealthAsync(currentApiUrl).GetAwaiter().GetResult();
                 if (!isServerHealthy)
                 {
@@ -122,12 +118,14 @@ namespace Onto_WaferMapHttpLib
                     return;
                 }
 
-                // 3. 업로드 (동적 URL 사용)
+                // 3. 업로드 및 결과 수신
                 string referenceAddress = UploadFileAsync(currentApiUrl, filePath, sdwt, eqpid).GetAwaiter().GetResult();
 
                 if (!string.IsNullOrEmpty(referenceAddress))
                 {
-                    // 4. Full URL 조합
+                    // 4. Full URL 조합 (필요 시) 및 DB 적재
+                    // API가 리턴한 referenceAddress가 이미 상대경로를 포함하므로 그대로 사용하거나 조합
+                    // 여기서는 API URL과 조합하여 Full URL을 만듭니다.
                     string fullUri = currentApiUrl + referenceAddress;
 
                     // 5. DB 적재
@@ -145,7 +143,6 @@ namespace Onto_WaferMapHttpLib
             }
         }
 
-        // [수정] URL을 인자로 받도록 변경
         private async Task<bool> CheckServerHealthAsync(string baseUrl)
         {
             try
@@ -163,7 +160,7 @@ namespace Onto_WaferMapHttpLib
             }
         }
 
-        // [수정] URL을 인자로 받도록 변경
+        // [수정] JSON 파싱 로직 개선 (대소문자 무시 및 로깅 추가)
         private async Task<string> UploadFileAsync(string baseUrl, string filePath, string sdwt, string eqpid)
         {
             try
@@ -182,7 +179,18 @@ namespace Onto_WaferMapHttpLib
                         var responseString = await response.Content.ReadAsStringAsync();
                         using (var jsonDoc = JsonDocument.Parse(responseString))
                         {
-                            return jsonDoc.RootElement.GetProperty("referenceAddress").GetString();
+                            // 대소문자 구분 없이 "referenceAddress" 속성 찾기
+                            foreach (var prop in jsonDoc.RootElement.EnumerateObject())
+                            {
+                                if (prop.Name.Equals("referenceAddress", StringComparison.OrdinalIgnoreCase))
+                                {
+                                    return prop.Value.GetString();
+                                }
+                            }
+
+                            // 키를 찾지 못한 경우 응답 내용 로깅
+                            SimpleLogger.Error($"[Upload] JSON Key 'referenceAddress' not found. Server response: {responseString}");
+                            return null;
                         }
                     }
                     else
@@ -199,7 +207,6 @@ namespace Onto_WaferMapHttpLib
             }
         }
 
-        // ... (InsertToDatabase, GetSdwtFromDatabase, Helper Methods 등 나머지 코드는 기존과 동일) ...
         private void InsertToDatabase(string localFilePath, string eqpid, string fileUri)
         {
             string fileName = Path.GetFileName(localFilePath);

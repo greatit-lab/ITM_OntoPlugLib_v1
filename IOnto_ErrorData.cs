@@ -287,7 +287,6 @@ namespace Onto_ErrorDataLib
                 srv = new DateTime(srv.Year, srv.Month, srv.Day, srv.Hour, srv.Minute, srv.Second);
 
                 // ★ [수정] 42P10 오류 해결을 위해 Try-Catch-Update 패턴으로 변경
-                
                 const string INSERT_SQL = @"
                     INSERT INTO public.itm_info
                         (eqpid, system_name, system_model, serial_num, application, version, db_version, ""date"", serv_ts)
@@ -510,7 +509,7 @@ namespace Onto_ErrorDataLib
                     cmd.Parameters.AddWithValue("@dbv", r["db_version"] ?? (object)DBNull.Value);
 
                     object o = cmd.ExecuteScalar();
-                    return o == null; 
+                    return o == null;
                 }
             }
         }

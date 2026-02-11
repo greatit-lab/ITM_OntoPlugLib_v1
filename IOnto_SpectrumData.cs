@@ -11,7 +11,8 @@ using System.Threading;
 using System.Threading.Tasks;
 using ConnectInfo;
 using Npgsql;
-using ITM_Agent.Services;
+using NpgsqlTypes; // 파라미터 타입 정의용
+using ITM_Agent.Services; // TimeSyncProvider 사용
 
 namespace Onto_SpectrumDataLib
 {
@@ -81,15 +82,21 @@ namespace Onto_SpectrumDataLib
         {
             if (!WaitForFileReady(filePath))
             {
-                // [수정] 파일 잠김/미존재는 Debug 로그로 전환하여 error.log 오염 방지
+                // [수정] 파일 잠김/미존재는 Debug 로그로 전환
                 SimpleLogger.Debug($"File locked or not found (Skipping): {filePath}");
                 return;
             }
 
             try
             {
+                // [개선] 31PT 문제 및 분리된 LotID 문제 해결 로직 적용
                 var meta = ParseFileName(filePath);
-                if (meta == null) return;
+                if (meta == null)
+                {
+                    // 파싱 실패 시 로그 남기고 종료 (빈 리턴 방지)
+                    SimpleLogger.Debug($"Filename parse failed: {Path.GetFileName(filePath)}");
+                    return; 
+                }
 
                 meta.EqpId = GetEqpidFromSettings(settingsPathObj as string);
 
@@ -110,7 +117,7 @@ namespace Onto_SpectrumDataLib
             }
             catch (IOException ioEx)
             {
-                // [수정] IO 예외(파일 잠김 등)는 Debug 로그로 처리
+                // [수정] IO 예외는 Debug 로그로 처리
                 SimpleLogger.Debug($"Process Locked (IOException): {ioEx.Message}");
             }
             catch (Exception ex)
@@ -167,7 +174,7 @@ namespace Onto_SpectrumDataLib
                     conn.Open();
                     using (var tx = conn.BeginTransaction())
                     {
-                        // [수정] 컬럼명 변경 (ts, lotid, waferid, point, class, type, angle)
+                        // [수정] serv_ts 컬럼 포함
                         const string sql = @"
                             INSERT INTO public.plg_onto_spectrum
                             (
@@ -194,18 +201,18 @@ namespace Onto_SpectrumDataLib
 
                         using (var cmd = new NpgsqlCommand(sql, conn, tx))
                         {
-                            cmd.Parameters.Add(new NpgsqlParameter("@eqpid", NpgsqlTypes.NpgsqlDbType.Varchar));
-                            cmd.Parameters.Add(new NpgsqlParameter("@ts", NpgsqlTypes.NpgsqlDbType.Timestamp));
-                            cmd.Parameters.Add(new NpgsqlParameter("@serv_ts", NpgsqlTypes.NpgsqlDbType.Timestamp));
-                            cmd.Parameters.Add(new NpgsqlParameter("@lotid", NpgsqlTypes.NpgsqlDbType.Varchar));
-                            cmd.Parameters.Add(new NpgsqlParameter("@waferid", NpgsqlTypes.NpgsqlDbType.Varchar));
-                            cmd.Parameters.Add(new NpgsqlParameter("@point", NpgsqlTypes.NpgsqlDbType.Integer));
-                            cmd.Parameters.Add(new NpgsqlParameter("@class", NpgsqlTypes.NpgsqlDbType.Varchar));
-                            cmd.Parameters.Add(new NpgsqlParameter("@type", NpgsqlTypes.NpgsqlDbType.Varchar));
-                            cmd.Parameters.Add(new NpgsqlParameter("@angle", NpgsqlTypes.NpgsqlDbType.Real));
-                            cmd.Parameters.Add(new NpgsqlParameter("@val_summary", NpgsqlTypes.NpgsqlDbType.Real));
-                            cmd.Parameters.Add(new NpgsqlParameter("@wavelengths", NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Real));
-                            cmd.Parameters.Add(new NpgsqlParameter("@values", NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Real));
+                            cmd.Parameters.Add(new NpgsqlParameter("@eqpid", NpgsqlDbType.Varchar));
+                            cmd.Parameters.Add(new NpgsqlParameter("@ts", NpgsqlDbType.Timestamp));
+                            cmd.Parameters.Add(new NpgsqlParameter("@serv_ts", NpgsqlDbType.Timestamp));
+                            cmd.Parameters.Add(new NpgsqlParameter("@lotid", NpgsqlDbType.Varchar));
+                            cmd.Parameters.Add(new NpgsqlParameter("@waferid", NpgsqlDbType.Varchar));
+                            cmd.Parameters.Add(new NpgsqlParameter("@point", NpgsqlDbType.Integer));
+                            cmd.Parameters.Add(new NpgsqlParameter("@class", NpgsqlDbType.Varchar));
+                            cmd.Parameters.Add(new NpgsqlParameter("@type", NpgsqlDbType.Varchar));
+                            cmd.Parameters.Add(new NpgsqlParameter("@angle", NpgsqlDbType.Real));
+                            cmd.Parameters.Add(new NpgsqlParameter("@val_summary", NpgsqlDbType.Real));
+                            cmd.Parameters.Add(new NpgsqlParameter("@wavelengths", NpgsqlDbType.Array | NpgsqlDbType.Real));
+                            cmd.Parameters.Add(new NpgsqlParameter("@values", NpgsqlDbType.Array | NpgsqlDbType.Real));
 
                             foreach (var item in items)
                             {
@@ -215,12 +222,12 @@ namespace Onto_SpectrumDataLib
 
                                 cmd.Parameters["@eqpid"].Value = item.Meta.EqpId;
                                 cmd.Parameters["@ts"].Value = item.Meta.MeasureTs;
-                                cmd.Parameters["@serv_ts"].Value = truncatedKst; // 절삭된 시간 사용
+                                cmd.Parameters["@serv_ts"].Value = truncatedKst; // 절삭된 시간
                                 cmd.Parameters["@lotid"].Value = item.Meta.LotId;
                                 cmd.Parameters["@waferid"].Value = item.Meta.WaferId;
                                 cmd.Parameters["@point"].Value = item.Meta.PointNo;
                                 cmd.Parameters["@class"].Value = item.Meta.DataClass;
-                                cmd.Parameters["@type"].Value = item.Data.PolType;
+                                cmd.Parameters["@type"].Value = item.Data.PolType ?? (object)DBNull.Value;
                                 cmd.Parameters["@angle"].Value = item.Data.AngleVal;
                                 cmd.Parameters["@val_summary"].Value = item.Data.ValSummary.HasValue ? (object)item.Data.ValSummary.Value : DBNull.Value;
                                 cmd.Parameters["@wavelengths"].Value = item.Data.Wavelengths.ToArray();
@@ -245,28 +252,107 @@ namespace Onto_SpectrumDataLib
         private class FileMeta { public string EqpId; public DateTime MeasureTs; public string LotId; public string WaferId; public int PointNo; public string DataClass; }
         private class SpectrumData { public string PolType; public float AngleVal; public float? ValSummary; public List<float> Wavelengths = new List<float>(); public List<float> Values = new List<float>(); }
 
-        // --- 파싱 로직 (기존 동일) ---
+        // --- [핵심 수정] 파일명 파싱 로직 ---
         private FileMeta ParseFileName(string filePath)
         {
             string fileName = Path.GetFileNameWithoutExtension(filePath);
             string[] parts = fileName.Split('_');
-            if (parts.Length < 10) return null;
+
+            // 최소 길이 체크 (날짜2 + EQP1 + Lot1 + Wafer1 = 최소 5개)
+            if (parts.Length < 5) return null;
+
+            var meta = new FileMeta();
+
             try
             {
-                var meta = new FileMeta();
+                // 1. 날짜/시간 (인덱스 0, 1은 항상 고정)
                 string dateStr = parts[0] + parts[1];
-                meta.MeasureTs = DateTime.ParseExact(dateStr, "yyyyMMddHHmmss", null);
-                meta.LotId = parts[4];
-                string rawWafer = parts[5];
-                var match = Regex.Match(rawWafer, @"W(\d+)");
-                meta.WaferId = match.Success ? match.Groups[1].Value : rawWafer;
+                if (!DateTime.TryParseExact(dateStr, "yyyyMMddHHmmss", null, System.Globalization.DateTimeStyles.None, out meta.MeasureTs))
+                {
+                    meta.MeasureTs = DateTime.Now;
+                }
+
+                // 2. WaferID 패턴(W+숫자)의 위치 찾기
+                int waferIndex = -1;
+                for (int i = 0; i < parts.Length; i++)
+                {
+                    // "W"를 포함하고 뒤에 숫자가 오는지 확인 (가장 확실한 기준점)
+                    var match = Regex.Match(parts[i], @"W(\d+)");
+                    if (match.Success)
+                    {
+                        waferIndex = i;
+                        meta.WaferId = match.Groups[1].Value; // 숫자만 추출 (예: 13)
+                        break;
+                    }
+                }
+
+                if (waferIndex == -1)
+                {
+                    // WaferID 패턴을 못 찾으면 기존 방식(인덱스 기반)이나 Unknown 처리
+                    // 여기서는 안전하게 리턴
+                    SimpleLogger.Debug($"WaferID pattern (W#) NOT found: {fileName}");
+                    return null;
+                }
+
+                // 3. LotID 추출 (WaferID 바로 앞의 1~2개 덩어리만 확인)
+                // "31PT" 같은게 앞에 있어도, WaferID 바로 앞만 보기 때문에 무시됨
+                
+                if (waferIndex >= 2)
+                {
+                    string prev1 = parts[waferIndex - 1]; // Wafer 바로 앞 (예: "1" 또는 "AAA001" 또는 "LOT123")
+                    
+                    // [판단 로직] 바로 앞이 "숫자"로만 구성되어 있다면 -> 분리된 LotID의 뒷부분(Suffix)임
+                    if (Regex.IsMatch(prev1, @"^\d+$"))
+                    {
+                        // 분리된 경우: 그 앞부분(prev2)과 합침
+                        // 예: ..._A1AA00_1_C1W13... -> "A1AA00.1"
+                        // 예: ..._31PT_AAA001_1_C3W12... -> "AAA001.1" (31PT는 무시됨)
+                        string prev2 = parts[waferIndex - 2];
+                        meta.LotId = $"{prev2}.{prev1}";
+                    }
+                    else
+                    {
+                        // 분리되지 않은 경우: 바로 앞부분이 전체 LotID임
+                        // 예: ..._LOT123_C1W13... -> "LOT123"
+                        meta.LotId = prev1;
+                    }
+                }
+                else if (waferIndex == 1)
+                {
+                    // 구조상 거의 없겠지만 예외 처리
+                    meta.LotId = parts[0]; 
+                }
+                else
+                {
+                    meta.LotId = "Unknown";
+                }
+
+                // 4. PointNo 및 DataClass 추출 (파일명 맨 뒤)
                 string lastPart = parts[parts.Length - 1];
-                if (lastPart.EndsWith("Exp", StringComparison.OrdinalIgnoreCase)) { meta.DataClass = "EXP"; meta.PointNo = int.Parse(lastPart.Replace("Exp", "")); }
-                else if (lastPart.EndsWith("Gen", StringComparison.OrdinalIgnoreCase)) { meta.DataClass = "GEN"; meta.PointNo = int.Parse(lastPart.Replace("Gen", "")); }
-                else { meta.DataClass = "UNK"; meta.PointNo = 0; }
+                if (lastPart.EndsWith("Exp", StringComparison.OrdinalIgnoreCase))
+                {
+                    meta.DataClass = "EXP";
+                    string numStr = Regex.Replace(lastPart, "[^0-9]", "");
+                    int.TryParse(numStr, out meta.PointNo);
+                }
+                else if (lastPart.EndsWith("Gen", StringComparison.OrdinalIgnoreCase))
+                {
+                    meta.DataClass = "GEN";
+                    string numStr = Regex.Replace(lastPart, "[^0-9]", "");
+                    int.TryParse(numStr, out meta.PointNo);
+                }
+                else
+                {
+                    meta.DataClass = "UNK";
+                    meta.PointNo = 0;
+                }
+
                 return meta;
             }
-            catch { return null; }
+            catch
+            {
+                return null;
+            }
         }
 
         private SpectrumData ParseFileContent(string filePath)
@@ -275,6 +361,7 @@ namespace Onto_SpectrumDataLib
             const float TARGET_WAVELENGTH = 633.0f;
             float minDiff = float.MaxValue;
             bool angleFound = false;
+
             using (var sr = new StreamReader(filePath, Encoding.Default))
             {
                 string line;
@@ -282,7 +369,9 @@ namespace Onto_SpectrumDataLib
                 {
                     line = line.Trim();
                     if (string.IsNullOrWhiteSpace(line)) continue;
-                    if (line.StartsWith("sR") || line.StartsWith("uR"))
+
+                    if (line.StartsWith("sR", StringComparison.OrdinalIgnoreCase) || 
+                        line.StartsWith("uR", StringComparison.OrdinalIgnoreCase))
                     {
                         var tokens = line.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
                         if (tokens.Length >= 4)
@@ -290,11 +379,21 @@ namespace Onto_SpectrumDataLib
                             result.PolType = tokens[0];
                             if (float.TryParse(tokens[1], out float nm) && float.TryParse(tokens[3], out float val))
                             {
-                                if (!angleFound && float.TryParse(tokens[2], out float ang)) { result.AngleVal = ang; angleFound = true; }
+                                if (!angleFound && float.TryParse(tokens[2], out float ang)) 
+                                { 
+                                    result.AngleVal = ang; 
+                                    angleFound = true; 
+                                }
+                                
                                 result.Wavelengths.Add(nm);
                                 result.Values.Add(val);
+
                                 float diff = Math.Abs(nm - TARGET_WAVELENGTH);
-                                if (diff < minDiff) { minDiff = diff; result.ValSummary = val; }
+                                if (diff < minDiff) 
+                                { 
+                                    minDiff = diff; 
+                                    result.ValSummary = val; 
+                                }
                             }
                         }
                     }
@@ -307,7 +406,13 @@ namespace Onto_SpectrumDataLib
         {
             string path = iniPath ?? Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Settings.ini");
             if (!File.Exists(path)) return "UNKNOWN";
-            try { foreach (var line in File.ReadAllLines(path)) if (line.Trim().StartsWith("Eqpid", StringComparison.OrdinalIgnoreCase)) return line.Split('=')[1].Trim(); } catch { }
+            try 
+            { 
+                foreach (var line in File.ReadAllLines(path)) 
+                    if (line.Trim().StartsWith("Eqpid", StringComparison.OrdinalIgnoreCase)) 
+                        return line.Split('=')[1].Trim(); 
+            } 
+            catch { }
             return "UNKNOWN";
         }
 

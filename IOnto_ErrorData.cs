@@ -54,7 +54,6 @@ namespace Onto_ErrorDataLib
 
     public class Onto_ErrorData : IOnto_ErrorData
     {
-        // 증분 처리를 위한 마지막 파일 크기(Offset) 저장소
         private static readonly Dictionary<string, long> _lastLen =
             new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
 
@@ -85,13 +84,13 @@ namespace Onto_ErrorDataLib
 
             try
             {
-                // --- 증분 처리를 위한 길이 확인 및 파일 읽기 ---
                 lock (_lastLen)
                 {
                     _lastLen.TryGetValue(filePath, out prevLen);
                 }
 
-                using (var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+                // [핵심 개선] FileShare.ReadWrite | FileShare.Delete 적용 (장비의 쓰기/삭제 완벽 허용)
+                using (var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
                 {
                     currLen = fs.Length;
 
@@ -107,7 +106,6 @@ namespace Onto_ErrorDataLib
                         prevLen = 0;
                     }
 
-                    // [메타데이터 처리] (최초 실행 시에만 전체 읽기)
                     if (prevLen == 0)
                     {
                         using (var srMeta = new StreamReader(fs, Encoding.GetEncoding(949)))
@@ -117,7 +115,6 @@ namespace Onto_ErrorDataLib
                             addedLines = allLinesForMeta;
                         }
                     }
-                    // [증분 데이터 처리] (이후에는 추가된 부분만 읽기)
                     else
                     {
                         fs.Seek(prevLen, SeekOrigin.Begin);
@@ -129,7 +126,6 @@ namespace Onto_ErrorDataLib
                     }
                 }
 
-                // [메타데이터 처리]
                 if (prevLen == 0 && allLinesForMeta != null)
                 {
                     var meta = ParseMeta(allLinesForMeta);
@@ -139,7 +135,6 @@ namespace Onto_ErrorDataLib
                     UploadItmInfoUpsert(infoTable);
                 }
 
-                // [오류 데이터 처리]
                 if (addedLines == null || addedLines.Length == 0)
                 {
                     SimpleLogger.Debug("No new lines detected.");
@@ -286,7 +281,6 @@ namespace Onto_ErrorDataLib
                               .Instance.ToSynchronizedKst(srcDate);
                 srv = new DateTime(srv.Year, srv.Month, srv.Day, srv.Hour, srv.Minute, srv.Second);
 
-                // ★ [수정] 42P10 오류 해결을 위해 Try-Catch-Update 패턴으로 변경
                 const string INSERT_SQL = @"
                     INSERT INTO public.itm_info
                         (eqpid, system_name, system_model, serial_num, application, version, db_version, ""date"", serv_ts)
@@ -312,7 +306,6 @@ namespace Onto_ErrorDataLib
                 {
                     conn.Open();
 
-                    // 파라미터 세팅 로컬 함수
                     void SetParams(NpgsqlCommand cmd)
                     {
                         cmd.Parameters.AddWithValue("@eqpid", r["eqpid"] ?? (object)DBNull.Value);
@@ -338,7 +331,6 @@ namespace Onto_ErrorDataLib
 
                     try
                     {
-                        // 1. INSERT 시도
                         using (var cmd = new NpgsqlCommand(INSERT_SQL, conn))
                         {
                             SetParams(cmd);
@@ -346,9 +338,8 @@ namespace Onto_ErrorDataLib
                         }
                         SimpleLogger.Event("itm_info inserted ▶ eqpid=" + (r["eqpid"] ?? ""));
                     }
-                    catch (PostgresException pgEx) when (pgEx.SqlState == "23505") // 23505: Unique Violation
+                    catch (PostgresException pgEx) when (pgEx.SqlState == "23505")
                     {
-                        // 2. 중복 발생 시 UPDATE 실행
                         using (var cmd = new NpgsqlCommand(UPDATE_SQL, conn))
                         {
                             SetParams(cmd);
@@ -583,7 +574,8 @@ namespace Onto_ErrorDataLib
                 {
                     try
                     {
-                        using (var fs = File.Open(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+                        // [핵심 개선] FileShare.ReadWrite | FileShare.Delete
+                        using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
                         {
                             return true;
                         }

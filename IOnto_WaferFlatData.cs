@@ -285,7 +285,6 @@ namespace Onto_WaferFlatDataLib
             if (!dt.Columns.Contains("serv_ts"))
                 dt.Columns.Add("serv_ts", typeof(DateTime));
 
-            // [수정] serv_ts 생성 시 초 단위 이하 절삭 로직 적용
             foreach (DataRow r in dt.Rows)
             {
                 if (r["datetime"] != DBNull.Value)
@@ -375,9 +374,10 @@ namespace Onto_WaferFlatDataLib
                         string unnestFields = string.Join(",", cols.Select(c => $"u.\"{c}\""));
                         string unnestParams = string.Join(",", cols.Select(c => $"@{c}"));
 
+                        // [수정] ON CONFLICT DO NOTHING 추가: 23505 에러 방지
                         string sql = $"INSERT INTO public.plg_wf_flat ({colList}) " +
                                      $"SELECT {unnestFields} FROM unnest({unnestParams}) " +
-                                     $"AS u({colList})";
+                                     $"AS u({colList}) ON CONFLICT DO NOTHING;";
 
                         using (var cmd = new NpgsqlCommand(sql, conn, tx))
                         {

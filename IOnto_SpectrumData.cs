@@ -82,7 +82,7 @@ namespace Onto_SpectrumDataLib
         {
             if (!WaitForFileReady(filePath))
             {
-                // [수정] 파일 잠김/미존재는 Debug 로그로 전환
+                // 파일 잠김/미존재는 Debug 로그로 전환
                 SimpleLogger.Debug($"File locked or not found (Skipping): {filePath}");
                 return;
             }
@@ -117,7 +117,7 @@ namespace Onto_SpectrumDataLib
             }
             catch (IOException ioEx)
             {
-                // [수정] IO 예외는 Debug 로그로 처리
+                // IO 예외는 Debug 로그로 처리
                 SimpleLogger.Debug($"Process Locked (IOException): {ioEx.Message}");
             }
             catch (Exception ex)
@@ -199,39 +199,27 @@ namespace Onto_SpectrumDataLib
                                 serv_ts = EXCLUDED.serv_ts;
                         ";
 
-                        using (var cmd = new NpgsqlCommand(sql, conn, tx))
+                        // [핵심 변경점] Npgsql 파라미터 배열 캐싱 충돌 버그 방지를 위해 Command를 루프 안에서 매번 새로 생성
+                        foreach (var item in items)
                         {
-                            cmd.Parameters.Add(new NpgsqlParameter("@eqpid", NpgsqlDbType.Varchar));
-                            cmd.Parameters.Add(new NpgsqlParameter("@ts", NpgsqlDbType.Timestamp));
-                            cmd.Parameters.Add(new NpgsqlParameter("@serv_ts", NpgsqlDbType.Timestamp));
-                            cmd.Parameters.Add(new NpgsqlParameter("@lotid", NpgsqlDbType.Varchar));
-                            cmd.Parameters.Add(new NpgsqlParameter("@waferid", NpgsqlDbType.Varchar));
-                            cmd.Parameters.Add(new NpgsqlParameter("@point", NpgsqlDbType.Integer));
-                            cmd.Parameters.Add(new NpgsqlParameter("@class", NpgsqlDbType.Varchar));
-                            cmd.Parameters.Add(new NpgsqlParameter("@type", NpgsqlDbType.Varchar));
-                            cmd.Parameters.Add(new NpgsqlParameter("@angle", NpgsqlDbType.Real));
-                            cmd.Parameters.Add(new NpgsqlParameter("@val_summary", NpgsqlDbType.Real));
-                            cmd.Parameters.Add(new NpgsqlParameter("@wavelengths", NpgsqlDbType.Array | NpgsqlDbType.Real));
-                            cmd.Parameters.Add(new NpgsqlParameter("@values", NpgsqlDbType.Array | NpgsqlDbType.Real));
-
-                            foreach (var item in items)
+                            using (var cmd = new NpgsqlCommand(sql, conn, tx))
                             {
-                                // [수정] 서버 시간 보정 및 초 단위 절삭 (YYYY-MM-DD HH:MM:SS)
+                                // 서버 시간 보정 및 초 단위 절삭 (YYYY-MM-DD HH:MM:SS)
                                 DateTime rawKst = TimeSyncProvider.Instance.ToSynchronizedKst(item.Meta.MeasureTs);
                                 DateTime truncatedKst = new DateTime(rawKst.Year, rawKst.Month, rawKst.Day, rawKst.Hour, rawKst.Minute, rawKst.Second);
 
-                                cmd.Parameters["@eqpid"].Value = item.Meta.EqpId;
-                                cmd.Parameters["@ts"].Value = item.Meta.MeasureTs;
-                                cmd.Parameters["@serv_ts"].Value = truncatedKst; // 절삭된 시간
-                                cmd.Parameters["@lotid"].Value = item.Meta.LotId;
-                                cmd.Parameters["@waferid"].Value = item.Meta.WaferId;
-                                cmd.Parameters["@point"].Value = item.Meta.PointNo;
-                                cmd.Parameters["@class"].Value = item.Meta.DataClass;
-                                cmd.Parameters["@type"].Value = item.Data.PolType ?? (object)DBNull.Value;
-                                cmd.Parameters["@angle"].Value = item.Data.AngleVal;
-                                cmd.Parameters["@val_summary"].Value = item.Data.ValSummary.HasValue ? (object)item.Data.ValSummary.Value : DBNull.Value;
-                                cmd.Parameters["@wavelengths"].Value = item.Data.Wavelengths.ToArray();
-                                cmd.Parameters["@values"].Value = item.Data.Values.ToArray();
+                                cmd.Parameters.Add(new NpgsqlParameter("@eqpid", NpgsqlDbType.Varchar) { Value = item.Meta.EqpId });
+                                cmd.Parameters.Add(new NpgsqlParameter("@ts", NpgsqlDbType.Timestamp) { Value = item.Meta.MeasureTs });
+                                cmd.Parameters.Add(new NpgsqlParameter("@serv_ts", NpgsqlDbType.Timestamp) { Value = truncatedKst });
+                                cmd.Parameters.Add(new NpgsqlParameter("@lotid", NpgsqlDbType.Varchar) { Value = item.Meta.LotId });
+                                cmd.Parameters.Add(new NpgsqlParameter("@waferid", NpgsqlDbType.Varchar) { Value = item.Meta.WaferId });
+                                cmd.Parameters.Add(new NpgsqlParameter("@point", NpgsqlDbType.Integer) { Value = item.Meta.PointNo });
+                                cmd.Parameters.Add(new NpgsqlParameter("@class", NpgsqlDbType.Varchar) { Value = item.Meta.DataClass });
+                                cmd.Parameters.Add(new NpgsqlParameter("@type", NpgsqlDbType.Varchar) { Value = item.Data.PolType ?? (object)DBNull.Value });
+                                cmd.Parameters.Add(new NpgsqlParameter("@angle", NpgsqlDbType.Real) { Value = item.Data.AngleVal });
+                                cmd.Parameters.Add(new NpgsqlParameter("@val_summary", NpgsqlDbType.Real) { Value = item.Data.ValSummary.HasValue ? (object)item.Data.ValSummary.Value : DBNull.Value });
+                                cmd.Parameters.Add(new NpgsqlParameter("@wavelengths", NpgsqlDbType.Array | NpgsqlDbType.Real) { Value = item.Data.Wavelengths.ToArray() });
+                                cmd.Parameters.Add(new NpgsqlParameter("@values", NpgsqlDbType.Array | NpgsqlDbType.Real) { Value = item.Data.Values.ToArray() });
 
                                 cmd.ExecuteNonQuery();
                             }
@@ -416,9 +404,23 @@ namespace Onto_SpectrumDataLib
             return "UNKNOWN";
         }
 
+        // [핵심 변경] FileShare.Read 적용 (파일 쓰기가 끝날 때까지 접근 차단)
         private bool WaitForFileReady(string path, int maxRetries = 5, int delayMs = 500)
         {
-            for (int i = 0; i < maxRetries; i++) { try { using (File.Open(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite)) return true; } catch (IOException) { Thread.Sleep(delayMs); } }
+            for (int i = 0; i < maxRetries; i++)
+            {
+                try
+                {
+                    using (File.Open(path, FileMode.Open, FileAccess.Read, FileShare.Read))
+                    {
+                        return true;
+                    }
+                }
+                catch (IOException)
+                {
+                    Thread.Sleep(delayMs);
+                }
+            }
             return false;
         }
     }

@@ -19,7 +19,7 @@ namespace Onto_WaferMapHttpLib
         public static void SetDebugMode(bool enable) => _debugEnabled = enable;
         private static readonly object _sync = new object();
         private static readonly string _logDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Logs");
-
+        
         private static void Write(string suffix, string msg)
         {
             try
@@ -33,7 +33,7 @@ namespace Onto_WaferMapHttpLib
             }
             catch { }
         }
-
+        
         public static void Event(string msg) => Write("event", msg);
         public static void Error(string msg) => Write("error", msg);
         public static void Debug(string msg) { if (_debugEnabled) Write("debug", msg); }
@@ -54,7 +54,7 @@ namespace Onto_WaferMapHttpLib
 
         // [핵심 해결 1] 메모리 폭증 방지 (최대 동시 작업 3개로 제한)
         // 수백 개의 파일이 몰리거나 서버가 멈춰도 백그라운드 스레드가 무한정 쌓이는 것을 방지합니다.
-        private static readonly SemaphoreSlim _uploadSemaphore = new SemaphoreSlim(3, 3);
+        private static readonly SemaphoreSlim _uploadLock = new SemaphoreSlim(3, 3);
 
         // API 포트 번호
         private const int ApiPort = 8082;
@@ -92,8 +92,8 @@ namespace Onto_WaferMapHttpLib
             // 작업 완료를 기다리지 않고 바로 리턴하여, 메인 화면(UI)이 절대 멈추지 않게 만듭니다.
             Task.Run(async () =>
             {
-                // 메모리 보호를 위해 대기열 진입 (최대 3개 동시 실행)
-                await _uploadSemaphore.WaitAsync().ConfigureAwait(false);
+                // 메모리 보호를 위해 최대 동시 실행 수 대기
+                await _uploadLock.WaitAsync().ConfigureAwait(false);
                 try
                 {
                     SimpleLogger.Event($"ProcessAndUpload ▶ {Path.GetFileName(filePath)}");
@@ -114,7 +114,7 @@ namespace Onto_WaferMapHttpLib
                     string currentApiUrl = GetDynamicApiUrl();
                     SimpleLogger.Debug($"Target API URL: {currentApiUrl}");
 
-                    // 1. Health Check (강제 대기(.GetResult()) 제거 -> await 비동기 대기)
+                    // 1. Health Check (UI 멈춤 없이 비동기로 체크 대기)
                     bool isServerHealthy = await CheckServerHealthAsync(currentApiUrl).ConfigureAwait(false);
                     if (!isServerHealthy)
                     {
@@ -130,12 +130,12 @@ namespace Onto_WaferMapHttpLib
                         return;
                     }
 
-                    // 3. 업로드 및 결과 수신 (비동기 대기)
+                    // 3. 업로드 및 결과 수신 (UI 멈춤 없이 비동기로 대기)
                     string referenceAddress = await UploadFileAsync(currentApiUrl, filePath, sdwt, eqpid).ConfigureAwait(false);
 
                     if (!string.IsNullOrEmpty(referenceAddress))
                     {
-                        // 4. Full URL 조합
+                        // 4. Full URL 조합 (필요 시) 및 DB 적재
                         string fullUri = currentApiUrl + referenceAddress;
 
                         // 5. DB 적재
@@ -153,8 +153,8 @@ namespace Onto_WaferMapHttpLib
                 }
                 finally
                 {
-                    // 처리가 끝나면 반드시 락을 해제하여 다음 파일이 처리될 수 있도록 함
-                    _uploadSemaphore.Release();
+                    // 처리가 끝나면 반드시 락을 해제하여 다음 파일이 처리되도록 함
+                    _uploadLock.Release();
                 }
             });
         }
@@ -163,9 +163,10 @@ namespace Onto_WaferMapHttpLib
         {
             try
             {
+                // 타임아웃 5초 설정 유지
                 using (var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5)))
                 {
-                    // ConfigureAwait(false)를 추가하여 데드락 원천 차단
+                    // ConfigureAwait(false)를 추가하여 크로스 스레드 데드락 원천 차단
                     var response = await httpClient.GetAsync($"{baseUrl}/api/FileUpload/health", cts.Token).ConfigureAwait(false);
                     return response.IsSuccessStatusCode;
                 }
@@ -177,6 +178,7 @@ namespace Onto_WaferMapHttpLib
             }
         }
 
+        // JSON 파싱 로직 개선 유지
         private async Task<string> UploadFileAsync(string baseUrl, string filePath, string sdwt, string eqpid)
         {
             try
@@ -188,7 +190,7 @@ namespace Onto_WaferMapHttpLib
                     content.Add(new StringContent(sdwt), "sdwt");
                     content.Add(new StringContent(eqpid), "eqpid");
 
-                    // 비동기 전송
+                    // 데드락 방지 ConfigureAwait(false)
                     var response = await httpClient.PostAsync($"{baseUrl}/api/FileUpload/upload", content).ConfigureAwait(false);
 
                     if (response.IsSuccessStatusCode)
@@ -205,6 +207,7 @@ namespace Onto_WaferMapHttpLib
                                 }
                             }
 
+                            // 키를 찾지 못한 경우 응답 내용 로깅
                             SimpleLogger.Error($"[Upload] JSON Key 'referenceAddress' not found. Server response: {responseString}");
                             return null;
                         }

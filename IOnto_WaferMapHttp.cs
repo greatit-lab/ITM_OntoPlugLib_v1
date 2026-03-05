@@ -12,13 +12,14 @@ using Npgsql; // NpgsqlConnectionStringBuilder 사용
 
 namespace Onto_WaferMapHttpLib
 {
-    /* (SimpleLogger 클래스는 기존과 동일) */
+    /*──────────────────────── Logger ────────────────────────*/
     internal static class SimpleLogger
     {
         private static volatile bool _debugEnabled = false;
         public static void SetDebugMode(bool enable) => _debugEnabled = enable;
         private static readonly object _sync = new object();
         private static readonly string _logDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Logs");
+
         private static void Write(string suffix, string msg)
         {
             try
@@ -32,6 +33,7 @@ namespace Onto_WaferMapHttpLib
             }
             catch { }
         }
+
         public static void Event(string msg) => Write("event", msg);
         public static void Error(string msg) => Write("error", msg);
         public static void Debug(string msg) { if (_debugEnabled) Write("debug", msg); }
@@ -49,6 +51,10 @@ namespace Onto_WaferMapHttpLib
         {
             Timeout = TimeSpan.FromSeconds(300)
         };
+
+        // [핵심 해결 1] 메모리 폭증 방지 (최대 동시 작업 3개로 제한)
+        // 수백 개의 파일이 몰리거나 서버가 멈춰도 백그라운드 스레드가 무한정 쌓이는 것을 방지합니다.
+        private static readonly SemaphoreSlim _uploadSemaphore = new SemaphoreSlim(3, 3);
 
         // API 포트 번호
         private const int ApiPort = 8082;
@@ -82,65 +88,75 @@ namespace Onto_WaferMapHttpLib
 
         public void ProcessAndUpload(string filePath, object settingsPathObj = null, object arg2 = null)
         {
-            SimpleLogger.Event($"ProcessAndUpload ▶ {Path.GetFileName(filePath)}");
-            if (!WaitForFileReady(filePath))
+            // [핵심 해결 2] UI 멈춤 방지 (비동기 백그라운드 작업 분리)
+            // 작업 완료를 기다리지 않고 바로 리턴하여, 메인 화면(UI)이 절대 멈추지 않게 만듭니다.
+            Task.Run(async () =>
             {
-                SimpleLogger.Error($"SKIP – File is locked or does not exist: {filePath}");
-                return;
-            }
-
-            string eqpid = GetEqpidFromSettings(settingsPathObj as string ?? "Settings.ini");
-            if (string.IsNullOrEmpty(eqpid))
-            {
-                SimpleLogger.Error("Eqpid not found. Aborting.");
-                return;
-            }
-
-            // 동적 URL 생성
-            string currentApiUrl = GetDynamicApiUrl();
-            SimpleLogger.Debug($"Target API URL: {currentApiUrl}");
-
-            try
-            {
-                // 1. Health Check
-                bool isServerHealthy = CheckServerHealthAsync(currentApiUrl).GetAwaiter().GetResult();
-                if (!isServerHealthy)
+                // 메모리 보호를 위해 대기열 진입 (최대 3개 동시 실행)
+                await _uploadSemaphore.WaitAsync().ConfigureAwait(false);
+                try
                 {
-                    SimpleLogger.Error($"API server health check failed ({currentApiUrl}). Aborting.");
-                    return;
-                }
+                    SimpleLogger.Event($"ProcessAndUpload ▶ {Path.GetFileName(filePath)}");
+                    if (!WaitForFileReady(filePath))
+                    {
+                        SimpleLogger.Error($"SKIP – File is locked or does not exist: {filePath}");
+                        return;
+                    }
 
-                // 2. SDWT 조회
-                string sdwt = GetSdwtFromDatabase(eqpid);
-                if (string.IsNullOrEmpty(sdwt))
+                    string eqpid = GetEqpidFromSettings(settingsPathObj as string ?? "Settings.ini");
+                    if (string.IsNullOrEmpty(eqpid))
+                    {
+                        SimpleLogger.Error("Eqpid not found. Aborting.");
+                        return;
+                    }
+
+                    // 동적 URL 생성
+                    string currentApiUrl = GetDynamicApiUrl();
+                    SimpleLogger.Debug($"Target API URL: {currentApiUrl}");
+
+                    // 1. Health Check (강제 대기(.GetResult()) 제거 -> await 비동기 대기)
+                    bool isServerHealthy = await CheckServerHealthAsync(currentApiUrl).ConfigureAwait(false);
+                    if (!isServerHealthy)
+                    {
+                        SimpleLogger.Error($"API server health check failed ({currentApiUrl}). Aborting.");
+                        return;
+                    }
+
+                    // 2. SDWT 조회
+                    string sdwt = GetSdwtFromDatabase(eqpid);
+                    if (string.IsNullOrEmpty(sdwt))
+                    {
+                        SimpleLogger.Error($"SDWT not found for eqpid '{eqpid}'. Aborting.");
+                        return;
+                    }
+
+                    // 3. 업로드 및 결과 수신 (비동기 대기)
+                    string referenceAddress = await UploadFileAsync(currentApiUrl, filePath, sdwt, eqpid).ConfigureAwait(false);
+
+                    if (!string.IsNullOrEmpty(referenceAddress))
+                    {
+                        // 4. Full URL 조합
+                        string fullUri = currentApiUrl + referenceAddress;
+
+                        // 5. DB 적재
+                        InsertToDatabase(filePath, eqpid, fullUri);
+
+                        // 6. 삭제
+                        TryDeleteLocalFile(filePath);
+
+                        SimpleLogger.Event($"SUCCESS - Uploaded to {currentApiUrl}");
+                    }
+                }
+                catch (Exception ex)
                 {
-                    SimpleLogger.Error($"SDWT not found for eqpid '{eqpid}'. Aborting.");
-                    return;
+                    SimpleLogger.Error($"Unhandled EX: {ex.GetBaseException().Message}");
                 }
-
-                // 3. 업로드 및 결과 수신
-                string referenceAddress = UploadFileAsync(currentApiUrl, filePath, sdwt, eqpid).GetAwaiter().GetResult();
-
-                if (!string.IsNullOrEmpty(referenceAddress))
+                finally
                 {
-                    // 4. Full URL 조합 (필요 시) 및 DB 적재
-                    // API가 리턴한 referenceAddress가 이미 상대경로를 포함하므로 그대로 사용하거나 조합
-                    // 여기서는 API URL과 조합하여 Full URL을 만듭니다.
-                    string fullUri = currentApiUrl + referenceAddress;
-
-                    // 5. DB 적재
-                    InsertToDatabase(filePath, eqpid, fullUri);
-
-                    // 6. 삭제
-                    TryDeleteLocalFile(filePath);
-
-                    SimpleLogger.Event($"SUCCESS - Uploaded to {currentApiUrl}");
+                    // 처리가 끝나면 반드시 락을 해제하여 다음 파일이 처리될 수 있도록 함
+                    _uploadSemaphore.Release();
                 }
-            }
-            catch (Exception ex)
-            {
-                SimpleLogger.Error($"Unhandled EX: {ex.GetBaseException().Message}");
-            }
+            });
         }
 
         private async Task<bool> CheckServerHealthAsync(string baseUrl)
@@ -149,7 +165,8 @@ namespace Onto_WaferMapHttpLib
             {
                 using (var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5)))
                 {
-                    var response = await httpClient.GetAsync($"{baseUrl}/api/FileUpload/health", cts.Token);
+                    // ConfigureAwait(false)를 추가하여 데드락 원천 차단
+                    var response = await httpClient.GetAsync($"{baseUrl}/api/FileUpload/health", cts.Token).ConfigureAwait(false);
                     return response.IsSuccessStatusCode;
                 }
             }
@@ -160,7 +177,6 @@ namespace Onto_WaferMapHttpLib
             }
         }
 
-        // [수정] JSON 파싱 로직 개선 (대소문자 무시 및 로깅 추가)
         private async Task<string> UploadFileAsync(string baseUrl, string filePath, string sdwt, string eqpid)
         {
             try
@@ -172,11 +188,12 @@ namespace Onto_WaferMapHttpLib
                     content.Add(new StringContent(sdwt), "sdwt");
                     content.Add(new StringContent(eqpid), "eqpid");
 
-                    var response = await httpClient.PostAsync($"{baseUrl}/api/FileUpload/upload", content);
+                    // 비동기 전송
+                    var response = await httpClient.PostAsync($"{baseUrl}/api/FileUpload/upload", content).ConfigureAwait(false);
 
                     if (response.IsSuccessStatusCode)
                     {
-                        var responseString = await response.Content.ReadAsStringAsync();
+                        var responseString = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
                         using (var jsonDoc = JsonDocument.Parse(responseString))
                         {
                             // 대소문자 구분 없이 "referenceAddress" 속성 찾기
@@ -188,7 +205,6 @@ namespace Onto_WaferMapHttpLib
                                 }
                             }
 
-                            // 키를 찾지 못한 경우 응답 내용 로깅
                             SimpleLogger.Error($"[Upload] JSON Key 'referenceAddress' not found. Server response: {responseString}");
                             return null;
                         }

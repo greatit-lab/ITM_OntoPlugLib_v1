@@ -19,7 +19,7 @@ namespace Onto_WaferMapHttpLib
         public static void SetDebugMode(bool enable) => _debugEnabled = enable;
         private static readonly object _sync = new object();
         private static readonly string _logDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Logs");
-        
+
         private static void Write(string suffix, string msg)
         {
             try
@@ -33,7 +33,7 @@ namespace Onto_WaferMapHttpLib
             }
             catch { }
         }
-        
+
         public static void Event(string msg) => Write("event", msg);
         public static void Error(string msg) => Write("error", msg);
         public static void Debug(string msg) { if (_debugEnabled) Write("debug", msg); }

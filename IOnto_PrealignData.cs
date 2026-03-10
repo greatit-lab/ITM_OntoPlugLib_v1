@@ -11,7 +11,7 @@ using System.Text.RegularExpressions;
 using System.Threading;
 using ConnectInfo;
 using Npgsql;
-using ITM_Agent.Services; 
+using ITM_Agent.Services;
 
 namespace Onto_PrealignDataLib
 {
@@ -69,7 +69,7 @@ namespace Onto_PrealignDataLib
                 Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
             #endif
         }
-        
+
         public Onto_PrealignData()
         {
             _pluginName = "Onto_PrealignData";
@@ -83,7 +83,7 @@ namespace Onto_PrealignDataLib
             long prevLen = 0;
             long currLen = 0;
             string addedText = "";
-            
+
             byte[] fileBuffer = null;
             long bytesToRead = 0;
 
@@ -122,7 +122,7 @@ namespace Onto_PrealignDataLib
                         {
                             fileBuffer = new byte[bytesToRead];
                             fs.Seek(prevLen, SeekOrigin.Begin);
-                            
+
                             int totalRead = 0;
                             while (totalRead < bytesToRead)
                             {
@@ -258,7 +258,7 @@ namespace Onto_PrealignDataLib
 
                     foreach (DataRow row in dt.Rows)
                     {
-                        eqpids.Add(row["eqpid"] as string); 
+                        eqpids.Add(row["eqpid"] as string);
                         datetimes.Add((DateTime)row["datetime"]);
                         xmms.Add((decimal)row["xmm"]);
                         ymms.Add((decimal)row["ymm"]);
@@ -317,7 +317,7 @@ namespace Onto_PrealignDataLib
                 : Path.Combine(AppDomain.CurrentDomain.BaseDirectory, ini);
 
             if (!File.Exists(iniPath)) return string.Empty;
-            try 
+            try
             {
                 foreach (string ln in File.ReadLines(iniPath))
                 {

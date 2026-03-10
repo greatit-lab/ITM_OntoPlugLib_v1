@@ -82,47 +82,97 @@ namespace Onto_ErrorDataLib
             string[] addedLines = null;
             string[] allLinesForMeta = null;
 
+            byte[] fileBuffer = null;
+            long bytesToRead = 0;
+            
+            int maxRetries = 5;
+            int delayMs = 100;
+            bool fileReadSuccess = false;
+
+            for (int i = 0; i < maxRetries; i++)
+            {
+                try
+                {
+                    lock (_lastLen)
+                    {
+                        _lastLen.TryGetValue(filePath, out prevLen);
+                    }
+
+                    // [핵심 개선] StreamReader 대신 Binary 바이트 초고속 읽기로 파일 점유(Lock) 시간 극소화
+                    using (var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+                    {
+                        currLen = fs.Length;
+
+                        if (currLen == prevLen && prevLen > 0)
+                        {
+                            SimpleLogger.Debug("File length unchanged, skipping incremental process: " + filePath);
+                            return;
+                        }
+
+                        if (currLen < prevLen)
+                        {
+                            SimpleLogger.Event("File truncated (Size decreased). Resetting offset: " + filePath);
+                            prevLen = 0;
+                        }
+
+                        bytesToRead = currLen - prevLen;
+                        if (bytesToRead > 0)
+                        {
+                            fileBuffer = new byte[bytesToRead];
+                            fs.Seek(prevLen, SeekOrigin.Begin);
+                            
+                            int totalRead = 0;
+                            while (totalRead < bytesToRead)
+                            {
+                                int read = fs.Read(fileBuffer, totalRead, (int)bytesToRead - totalRead);
+                                if (read == 0) break;
+                                totalRead += read;
+                            }
+                        }
+                    }
+                    fileReadSuccess = true;
+                    break;
+                }
+                catch (IOException ioEx) when (i < maxRetries - 1)
+                {
+                    SimpleLogger.Debug($"File locked, retry {i + 1}: {ioEx.Message}");
+                    Thread.Sleep(delayMs);
+                }
+                catch (FileNotFoundException)
+                {
+                    SimpleLogger.Debug("File not found (maybe deleted): " + filePath);
+                    lock (_lastLen) { _lastLen.Remove(filePath); }
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    SimpleLogger.Error($"Error reading file {filePath} on attempt {i + 1}: {ex.Message}");
+                    if (i == maxRetries - 1) return;
+                    Thread.Sleep(delayMs);
+                }
+            }
+
+            if (!fileReadSuccess)
+            {
+                SimpleLogger.Error($"IO Exception during processing {filePath} (retries failed). Skipping this turn.");
+                return;
+            }
+
             try
             {
-                lock (_lastLen)
+                // [핵심 개선] FileStream이 즉시 닫힌 후, 메모리 상에서 안전하게 문자열 디코딩 및 파싱 (장비 충돌 완전 분리)
+                if (fileBuffer != null && bytesToRead > 0)
                 {
-                    _lastLen.TryGetValue(filePath, out prevLen);
-                }
-
-                // [핵심 개선] FileShare.ReadWrite | FileShare.Delete 적용 (장비의 쓰기/삭제 완벽 허용)
-                using (var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
-                {
-                    currLen = fs.Length;
-
-                    if (currLen == prevLen && prevLen > 0)
-                    {
-                        SimpleLogger.Debug("File length unchanged, skipping incremental process: " + filePath);
-                        return;
-                    }
-
-                    if (currLen < prevLen)
-                    {
-                        SimpleLogger.Event("File truncated (Size decreased). Resetting offset: " + filePath);
-                        prevLen = 0;
-                    }
-
+                    string textData = Encoding.GetEncoding(949).GetString(fileBuffer);
+                    
                     if (prevLen == 0)
                     {
-                        using (var srMeta = new StreamReader(fs, Encoding.GetEncoding(949)))
-                        {
-                            string allTextForMeta = srMeta.ReadToEnd();
-                            allLinesForMeta = allTextForMeta.Split(new[] { "\r\n", "\n" }, StringSplitOptions.RemoveEmptyEntries);
-                            addedLines = allLinesForMeta;
-                        }
+                        allLinesForMeta = textData.Split(new[] { "\r\n", "\n" }, StringSplitOptions.RemoveEmptyEntries);
+                        addedLines = allLinesForMeta;
                     }
                     else
                     {
-                        fs.Seek(prevLen, SeekOrigin.Begin);
-                        using (var srAdded = new StreamReader(fs, Encoding.GetEncoding(949)))
-                        {
-                            string addedText = srAdded.ReadToEnd();
-                            addedLines = addedText.Split(new[] { "\r\n", "\n" }, StringSplitOptions.RemoveEmptyEntries);
-                        }
+                        addedLines = textData.Split(new[] { "\r\n", "\n" }, StringSplitOptions.RemoveEmptyEntries);
                     }
                 }
 
@@ -166,15 +216,6 @@ namespace Onto_ErrorDataLib
                 {
                     _lastLen[filePath] = currLen;
                 }
-            }
-            catch (FileNotFoundException)
-            {
-                SimpleLogger.Debug("File not found (maybe deleted): " + filePath);
-                lock (_lastLen) { _lastLen.Remove(filePath); }
-            }
-            catch (IOException ioEx)
-            {
-                SimpleLogger.Error($"IO Exception during processing {filePath} (retrying next time): {ioEx.Message}");
             }
             catch (Exception ex)
             {
@@ -566,29 +607,6 @@ namespace Onto_ErrorDataLib
         #endregion
 
         #region === Utility ===
-        private bool WaitForFileReady(string path, int maxRetries, int delayMs)
-        {
-            for (int i = 0; i < maxRetries; i++)
-            {
-                if (File.Exists(path))
-                {
-                    try
-                    {
-                        // [핵심 개선] FileShare.ReadWrite | FileShare.Delete
-                        using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
-                        {
-                            return true;
-                        }
-                    }
-                    catch (IOException)
-                    {
-                    }
-                }
-                Thread.Sleep(delayMs);
-            }
-            return false;
-        }
-
         private string GetEqpidFromSettings(string iniPath)
         {
             try

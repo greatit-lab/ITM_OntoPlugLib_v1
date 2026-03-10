@@ -84,7 +84,7 @@ namespace Onto_ErrorDataLib
 
             byte[] fileBuffer = null;
             long bytesToRead = 0;
-            
+
             int maxRetries = 5;
             int delayMs = 100;
             bool fileReadSuccess = false;
@@ -120,7 +120,7 @@ namespace Onto_ErrorDataLib
                         {
                             fileBuffer = new byte[bytesToRead];
                             fs.Seek(prevLen, SeekOrigin.Begin);
-                            
+
                             int totalRead = 0;
                             while (totalRead < bytesToRead)
                             {
@@ -164,7 +164,7 @@ namespace Onto_ErrorDataLib
                 if (fileBuffer != null && bytesToRead > 0)
                 {
                     string textData = Encoding.GetEncoding(949).GetString(fileBuffer);
-                    
+
                     if (prevLen == 0)
                     {
                         allLinesForMeta = textData.Split(new[] { "\r\n", "\n" }, StringSplitOptions.RemoveEmptyEntries);

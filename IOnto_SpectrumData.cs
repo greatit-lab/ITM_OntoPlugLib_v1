@@ -260,16 +260,16 @@ namespace Onto_SpectrumDataLib
                     meta.MeasureTs = DateTime.Now;
                 }
 
-                // 2. WaferID 패턴(W+숫자)의 위치 찾기
+                // 2. WaferID 패턴(C숫자W숫자)을 뒤에서부터 탐색하여 오작동 방지
                 int waferIndex = -1;
-                for (int i = 0; i < parts.Length; i++)
+                for (int i = parts.Length - 1; i >= 2; i--) // 최소 Index 2 이상에서만 탐색
                 {
-                    // "W"를 포함하고 뒤에 숫자가 오는지 확인 (가장 확실한 기준점)
-                    var match = Regex.Match(parts[i], @"W(\d+)");
+                    // C숫자W숫자 (예: C1W1, C2W13) 패턴을 엄격하게 매칭
+                    var match = Regex.Match(parts[i], @"C\d+W(\d+)", RegexOptions.IgnoreCase);
                     if (match.Success)
                     {
                         waferIndex = i;
-                        meta.WaferId = match.Groups[1].Value; // 숫자만 추출 (예: 13)
+                        meta.WaferId = match.Groups[1].Value; // W 뒤의 숫자만 추출
                         break;
                     }
                 }
@@ -278,36 +278,30 @@ namespace Onto_SpectrumDataLib
                 {
                     // WaferID 패턴을 못 찾으면 기존 방식(인덱스 기반)이나 Unknown 처리
                     // 여기서는 안전하게 리턴
-                    SimpleLogger.Debug($"WaferID pattern (W#) NOT found: {fileName}");
+                    SimpleLogger.Debug($"WaferID pattern (C#W#) NOT found: {fileName}");
                     return null;
                 }
 
                 // 3. LotID 추출 (WaferID 바로 앞의 1~2개 덩어리만 확인)
-                // "31PT" 같은게 앞에 있어도, WaferID 바로 앞만 보기 때문에 무시됨
-
                 if (waferIndex >= 2)
                 {
-                    string prev1 = parts[waferIndex - 1]; // Wafer 바로 앞 (예: "1" 또는 "AAA001" 또는 "LOT123")
+                    string prev1 = parts[waferIndex - 1]; // Wafer 바로 앞
 
                     // [판단 로직] 바로 앞이 "숫자"로만 구성되어 있다면 -> 분리된 LotID의 뒷부분(Suffix)임
                     if (Regex.IsMatch(prev1, @"^\d+$"))
                     {
                         // 분리된 경우: 그 앞부분(prev2)과 합침
-                        // 예: ..._A1AA00_1_C1W13... -> "A1AA00.1"
-                        // 예: ..._31PT_AAA001_1_C3W12... -> "AAA001.1" (31PT는 무시됨)
                         string prev2 = parts[waferIndex - 2];
                         meta.LotId = $"{prev2}.{prev1}";
                     }
                     else
                     {
                         // 분리되지 않은 경우: 바로 앞부분이 전체 LotID임
-                        // 예: ..._LOT123_C1W13... -> "LOT123"
                         meta.LotId = prev1;
                     }
                 }
                 else if (waferIndex == 1)
                 {
-                    // 구조상 거의 없겠지만 예외 처리
                     meta.LotId = parts[0];
                 }
                 else

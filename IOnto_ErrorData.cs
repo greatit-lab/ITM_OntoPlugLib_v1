@@ -1,6 +1,7 @@
 // Onto_ErrorDataLib/IOnto_ErrorData.cs
 using System;
 using System.Collections.Generic;
+using System.Collections.Concurrent;
 using System.Data;
 using System.Globalization;
 using System.IO;
@@ -57,6 +58,12 @@ namespace Onto_ErrorDataLib
         private static readonly Dictionary<string, long> _lastLen =
             new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
 
+        // [핵심 추가] 충돌 방지를 위한 지연 처리(Debounce) 큐 및 타이머
+        private static readonly ConcurrentDictionary<string, string> _pendingEqpids = new ConcurrentDictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        private static readonly ConcurrentDictionary<string, DateTime> _pendingProcessTime = new ConcurrentDictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
+        private static Timer _batchTimer;
+        private static int _isProcessing = 0;
+
         private readonly string _pluginName = "Onto_ErrorData";
         public string PluginName { get { return _pluginName; } }
 
@@ -68,14 +75,65 @@ namespace Onto_ErrorDataLib
             #if NETCOREAPP || NET5_0_OR_GREATER
                 Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
             #endif
+            // 10초 주기로 지연된 파일이 있는지 검사하는 백그라운드 타이머 작동
+            _batchTimer = new Timer(OnBatchTimer, null, 10000, 10000); 
         }
 
         #region === Public API ===
 
         public void ProcessAndUpload(string filePath, object arg1 = null, object arg2 = null)
         {
-            SimpleLogger.Event("Process (Incremental) ▶ " + filePath);
             string eqpid = GetEqpidFromSettings(arg1 as string ?? "Settings.ini");
+            _pendingEqpids[filePath] = eqpid;
+
+            // [핵심 방어] 즉시 읽지 않고, 30초 뒤에 읽도록 큐에 예약합니다.
+            // 에러가 다발성으로 쏟아지는 동안에는 Agent가 파일에 접근하지 않게 됩니다.
+            if (_pendingProcessTime.TryAdd(filePath, DateTime.Now.AddSeconds(30)))
+            {
+                SimpleLogger.Debug($"Event received. File queued for delayed processing (30s delay): {Path.GetFileName(filePath)}");
+            }
+        }
+
+        #endregion
+
+        #region === Batch Processing Core ===
+
+        private static void OnBatchTimer(object state)
+        {
+            if (Interlocked.CompareExchange(ref _isProcessing, 1, 0) != 0) return;
+
+            try
+            {
+                var now = DateTime.Now;
+                var filesToProcess = new List<string>();
+
+                foreach (var kvp in _pendingProcessTime)
+                {
+                    // 예약된 30초가 경과한 파일들만 추출
+                    if (now >= kvp.Value)
+                    {
+                        filesToProcess.Add(kvp.Key);
+                    }
+                }
+
+                foreach (var file in filesToProcess)
+                {
+                    _pendingProcessTime.TryRemove(file, out _);
+                    if (_pendingEqpids.TryRemove(file, out string eqpid))
+                    {
+                        ProcessFileActual(file, eqpid);
+                    }
+                }
+            }
+            finally
+            {
+                Interlocked.Exchange(ref _isProcessing, 0);
+            }
+        }
+
+        private static void ProcessFileActual(string filePath, string eqpid)
+        {
+            SimpleLogger.Event("Process (Batch/Incremental) ▶ " + filePath);
 
             long prevLen = 0;
             long currLen = 0;
@@ -85,7 +143,8 @@ namespace Onto_ErrorDataLib
             byte[] fileBuffer = null;
             long bytesToRead = 0;
 
-            int maxRetries = 5;
+            // 재시도 횟수 축소 (장비와 충돌 시 무리하게 싸우지 않고 바로 양보)
+            int maxRetries = 2; 
             int delayMs = 100;
             bool fileReadSuccess = false;
 
@@ -98,7 +157,6 @@ namespace Onto_ErrorDataLib
                         _lastLen.TryGetValue(filePath, out prevLen);
                     }
 
-                    // [핵심 개선] StreamReader 대신 Binary 바이트 초고속 읽기로 파일 점유(Lock) 시간 극소화
                     using (var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
                     {
                         currLen = fs.Length;
@@ -135,7 +193,7 @@ namespace Onto_ErrorDataLib
                 }
                 catch (IOException ioEx) when (i < maxRetries - 1)
                 {
-                    SimpleLogger.Debug($"File locked, retry {i + 1}: {ioEx.Message}");
+                    SimpleLogger.Debug($"File locked by equipment, retry {i + 1}: {ioEx.Message}");
                     Thread.Sleep(delayMs);
                 }
                 catch (FileNotFoundException)
@@ -154,13 +212,15 @@ namespace Onto_ErrorDataLib
 
             if (!fileReadSuccess)
             {
-                SimpleLogger.Error($"IO Exception during processing {filePath} (retries failed). Skipping this turn.");
+                // [핵심 예외 처리] 장비가 파일을 강하게 물고 있으면, 큐에 다시 밀어넣어 10초 뒤에 재시도
+                SimpleLogger.Error($"File is heavily locked by equipment. Yielding and re-queuing for later: {filePath}");
+                _pendingEqpids[filePath] = eqpid;
+                _pendingProcessTime.TryAdd(filePath, DateTime.Now.AddSeconds(10));
                 return;
             }
 
             try
             {
-                // [핵심 개선] FileStream이 즉시 닫힌 후, 메모리 상에서 안전하게 문자열 디코딩 및 파싱 (장비 충돌 완전 분리)
                 if (fileBuffer != null && bytesToRead > 0)
                 {
                     string textData = Encoding.GetEncoding(949).GetString(fileBuffer);
@@ -197,20 +257,14 @@ namespace Onto_ErrorDataLib
                     int matched, skipped;
                     DataTable filtered = ApplyErrorFilter(errorTable, allowSet, out matched, out skipped);
 
-                    SimpleLogger.Event(string.Format("ErrorFilter (Incremental) ▶ read_lines={0}, matched={1}, skipped={2}",
+                    SimpleLogger.Event(string.Format("ErrorFilter (Batch) ▶ read_lines={0}, matched={1}, skipped={2}",
                                           (addedLines ?? new string[0]).Length, matched, skipped));
 
                     if (filtered != null && filtered.Rows.Count > 0)
                     {
                         UploadDataTable(filtered, "plg_error");
                     }
-                    else
-                    {
-                        SimpleLogger.Event("No rows after filter ▶ plg_error");
-                    }
                 }
-
-                SimpleLogger.Event("Done (Incremental) ▶ " + Path.GetFileName(filePath));
 
                 lock (_lastLen)
                 {
@@ -219,13 +273,14 @@ namespace Onto_ErrorDataLib
             }
             catch (Exception ex)
             {
-                SimpleLogger.Error($"Unhandled EX in ProcessAndUpload for {filePath} ▶ {ex.GetBaseException().Message}");
+                SimpleLogger.Error($"Unhandled EX in ProcessFileActual for {filePath} ▶ {ex.GetBaseException().Message}");
             }
         }
 
         #endregion
 
-        #region === Core ===
+        #region === Core Data Processing & DB Helpers ===
+        
         private static string NormalizeErrorId(object v)
         {
             if (v == null || v == DBNull.Value) return string.Empty;
@@ -233,7 +288,7 @@ namespace Onto_ErrorDataLib
             return s.ToUpperInvariant();
         }
 
-        private HashSet<string> LoadErrorFilterSet()
+        private static HashSet<string> LoadErrorFilterSet()
         {
             var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             string cs = DatabaseInfo.CreateDefault().GetConnectionString();
@@ -264,7 +319,7 @@ namespace Onto_ErrorDataLib
             return set;
         }
 
-        private DataTable ApplyErrorFilter(DataTable src, HashSet<string> allowSet, out int matched, out int skipped)
+        private static DataTable ApplyErrorFilter(DataTable src, HashSet<string> allowSet, out int matched, out int skipped)
         {
             matched = 0; skipped = 0;
             if (src == null || src.Rows.Count == 0)
@@ -295,7 +350,7 @@ namespace Onto_ErrorDataLib
             return dst;
         }
 
-        private void UploadItmInfoUpsert(DataTable dt)
+        private static void UploadItmInfoUpsert(DataTable dt)
         {
             if (dt == null || dt.Rows.Count == 0) return;
 
@@ -396,7 +451,7 @@ namespace Onto_ErrorDataLib
             }
         }
 
-        private Dictionary<string, string> ParseMeta(string[] lines)
+        private static Dictionary<string, string> ParseMeta(string[] lines)
         {
             var d = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
@@ -426,7 +481,7 @@ namespace Onto_ErrorDataLib
             return d;
         }
 
-        private DataTable BuildInfoDataTable(Dictionary<string, string> meta)
+        private static DataTable BuildInfoDataTable(Dictionary<string, string> meta)
         {
             var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
             {
@@ -449,7 +504,7 @@ namespace Onto_ErrorDataLib
             return dt;
         }
 
-        private DataTable BuildErrorDataTable(string[] lines, string eqpid)
+        private static DataTable BuildErrorDataTable(string[] lines, string eqpid)
         {
             var dt = new DataTable();
             dt.Columns.AddRange(new[]
@@ -506,10 +561,8 @@ namespace Onto_ErrorDataLib
             }
             return dt;
         }
-        #endregion
 
-        #region === DB Helper ===
-        private bool IsInfoChanged(DataTable dt)
+        private static bool IsInfoChanged(DataTable dt)
         {
             if (dt == null || dt.Rows.Count == 0) return false;
             var r = dt.Rows[0];
@@ -546,7 +599,7 @@ namespace Onto_ErrorDataLib
             }
         }
 
-        private int UploadDataTable(DataTable dt, string tableName)
+        private static int UploadDataTable(DataTable dt, string tableName)
         {
             if (dt == null || dt.Rows.Count == 0) return 0;
 
@@ -604,10 +657,12 @@ namespace Onto_ErrorDataLib
                 }
             }
         }
+
         #endregion
 
         #region === Utility ===
-        private string GetEqpidFromSettings(string iniPath)
+        
+        private static string GetEqpidFromSettings(string iniPath)
         {
             try
             {
@@ -633,6 +688,7 @@ namespace Onto_ErrorDataLib
             }
             return string.Empty;
         }
+
         #endregion
     }
 }
